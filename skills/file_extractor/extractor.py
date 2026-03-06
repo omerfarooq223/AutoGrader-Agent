@@ -3,7 +3,9 @@ Extraction utilities for reading student submissions.
 Supports: PDF, DOCX, .py, .cpp, .ipynb
 """
 
+import base64
 import json
+import logging
 import shutil
 import zipfile
 import os
@@ -12,9 +14,56 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 from docx import Document
+from groq import Groq
 
+import config
+from utils.retry import retry_api_call
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".py", ".cpp", ".ipynb"}
+
+_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+_VISION_PROMPT = (
+    "Describe what is shown in this image in the context of a student assignment. "
+    "Be specific about any code output, charts, diagrams, or handwritten content you see."
+)
+
+
+def _describe_image(image_bytes: bytes) -> str | None:
+    """Send an image to Groq's vision model and return the description."""
+    try:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        client = Groq(api_key=config.GROQ_API_KEY)
+
+        def _call():
+            return client.chat.completions.create(
+                model=_VISION_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{b64}",
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": _VISION_PROMPT,
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=512,
+            )
+
+        response = retry_api_call(_call)
+        return response.choices[0].message.content.strip()
+    except Exception:
+        logger.debug("Vision API call failed for an image, skipping.", exc_info=True)
+        return None
 
 
 def extract_zip(zip_path: str, extract_to: str | None = None) -> str:
@@ -34,21 +83,50 @@ def extract_zip(zip_path: str, extract_to: str | None = None) -> str:
 
 
 def read_pdf(file_path: str) -> str:
-    """Extract text from a PDF file using PyMuPDF."""
+    """Extract text and embedded images from a PDF file using PyMuPDF."""
     text_parts: list[str] = []
     with fitz.open(file_path) as doc:
         for page in doc:
-            page_text = page.get_text()
-            if page_text:
+            page_text = page.get_text() or ""
+
+            # Extract embedded images from the page
+            for img_info in page.get_images(full=True):
+                xref = img_info[0]
+                try:
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    description = _describe_image(image_bytes)
+                    if description:
+                        page_text += f"\n[Image: {description}]"
+                except Exception:
+                    logger.debug("Failed to extract PDF image xref=%s, skipping.", xref, exc_info=True)
+
+            if page_text.strip():
                 text_parts.append(page_text)
     return "\n".join(text_parts).strip()
 
 
 def read_docx(file_path: str) -> str:
-    """Extract text from a DOCX file using python-docx."""
+    """Extract text and embedded images from a DOCX file using python-docx."""
     doc = Document(file_path)
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    return "\n".join(paragraphs).strip()
+    text = "\n".join(paragraphs)
+
+    # Extract images from the docx media folder
+    try:
+        for rel in doc.part.rels.values():
+            if "image" in rel.reltype:
+                try:
+                    image_bytes = rel.target_part.blob
+                    description = _describe_image(image_bytes)
+                    if description:
+                        text += f"\n[Image: {description}]"
+                except Exception:
+                    logger.debug("Failed to extract DOCX image, skipping.", exc_info=True)
+    except Exception:
+        logger.debug("Failed to iterate DOCX relationships, skipping images.", exc_info=True)
+
+    return text.strip()
 
 
 def read_text_file(file_path: str) -> str:

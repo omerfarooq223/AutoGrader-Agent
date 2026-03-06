@@ -51,13 +51,17 @@ AutoGrader/
 
 ## Supported File Formats
 
-| Format | Library |
-|--------|---------|
-| PDF | PyMuPDF |
-| DOCX | python-docx |
-| .py | stdlib |
-| .cpp | stdlib |
-| .ipynb | stdlib JSON |
+| Format | Library | Image Support |
+|--------|---------|---------------|
+| PDF | PyMuPDF | Yes — embedded images extracted and described via Groq Vision |
+| DOCX | python-docx | Yes — media images extracted and described via Groq Vision |
+| .py | stdlib | — |
+| .cpp | stdlib | — |
+| .ipynb | stdlib JSON | — |
+
+### Image Extraction
+
+Embedded images in PDF and DOCX files are automatically extracted and sent to Groq's vision model (`meta-llama/llama-4-scout-17b-16e-instruct`) for description. Each description is appended to the document text as `[Image: <description>]`, giving the grading LLM full visibility into diagrams, charts, code output screenshots, and handwritten content. If the vision API fails for any image, it is skipped silently — extraction never crashes.
 
 ## Quick Start
 
@@ -96,6 +100,7 @@ Generates `grading_report.xlsx` with two sheets:
 ## Tech Stack
 
 - **LLM**: Groq API → LLaMA 3.3 70B Versatile (128K context)
+- **Vision**: Groq API → LLaMA 4 Scout 17B (image understanding for embedded images)
 - **Plagiarism**: scikit-learn TF-IDF + custom n-gram Jaccard
 - **Reports**: openpyxl with conditional formatting
 - **UX**: Rich (progress bars, styled logging)

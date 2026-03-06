@@ -36,6 +36,7 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - All supported files are discovered via recursive directory walk.
 - Hidden/system directories (`__MACOSX`, `.git`) are skipped.
 - Each file is read and stored as `{filename, path, content}`.
+- **Image extraction**: Embedded images in PDF and DOCX files are extracted, sent to Groq's vision model (`meta-llama/llama-4-scout-17b-16e-instruct`), and the returned descriptions are appended to the document text as `[Image: <description>]`. This gives downstream grading full context on diagrams, charts, screenshots, and handwritten content. Vision API failures are handled silently with retries.
 
 ### Step 5: Grading
 - Each submission + the rubric is sent to LLaMA 3.3 70B.
@@ -80,6 +81,8 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 | Unsupported file format in ZIP | Skipped silently, only supported formats processed |
 | Corrupt file in ZIP | Error message stored as content instead of crashing |
 | Unsafe ZIP entries (zip-slip) | Rejected with ValueError before extraction |
+| Vision API failure for an image | Skipped silently, text extraction continues |
+| Corrupt/unreadable embedded image | Skipped silently, other images still processed |
 
 ---
 
