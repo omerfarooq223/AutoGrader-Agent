@@ -1,0 +1,11 @@
+{
+  "template_name": "Essay Assignment",
+  "match_keywords": ["essay", "write", "argument", "thesis", "paragraph", "analyze", "discuss", "critique", "compare", "evaluate", "literature", "research paper", "report"],
+  "criteria": [
+    {"name": "Argument", "max_score": 30, "description": ""},
+    {"name": "Evidence", "max_score": 25, "description": ""},
+    {"name": "Structure", "max_score": 20, "description": ""},
+    {"name": "Clarity", "max_score": 15, "description": ""},
+    {"name": "Formatting & Citations", "max_score": 10, "description": ""}
+  ]
+}

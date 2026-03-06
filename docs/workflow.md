@@ -19,11 +19,21 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - The extracted text is passed to the rubric generator.
 
 ### Step 3: Rubric Generation & Approval
-- The brief text is sent to LLaMA 3.3 70B via the Groq API.
-- The LLM produces a structured rubric with:
-  - Categories (e.g., Correctness, Code Quality, Documentation)
-  - Mark allocations per category
-  - Criteria for full, partial, and zero marks
+- Before generating, the system checks `rubrics/` for a matching template by scanning the brief for keywords (≥2 hits required).
+- **With template**: The LLM receives the template structure (criterion names and default weights) and is asked to keep the names, adjust weights for the specific assignment, and fill in detailed descriptions.
+- **Without template**: The brief text is sent to LLaMA 3.3 70B to generate a rubric from scratch.
+- In both cases, the LLM produces a **structured JSON rubric** matching this schema:
+  ```json
+  {
+    "criteria": [
+      {"name": "Correctness", "max_score": 40, "description": "..."},
+      {"name": "Code Quality", "max_score": 30, "description": "..."},
+      {"name": "Documentation", "max_score": 20, "description": "..."},
+      {"name": "Formatting", "max_score": 10, "description": "..."}
+    ]
+  }
+  ```
+- The output is validated via `_parse_rubric_json()` — invalid JSON triggers an automatic retry.
 - The user reviews the rubric and chooses to:
   - **Approve** it as-is
   - **Edit** it manually
@@ -39,7 +49,8 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - **Image extraction**: Embedded images in PDF and DOCX files are extracted, sent to Groq's vision model (`meta-llama/llama-4-scout-17b-16e-instruct`), and the returned descriptions are appended to the document text as `[Image: <description>]`. This gives downstream grading full context on diagrams, charts, screenshots, and handwritten content. Vision API failures are handled silently with retries.
 
 ### Step 5: Grading
-- Each submission + the rubric is sent to LLaMA 3.3 70B.
+- Each submission + the structured JSON rubric is sent to LLaMA 3.3 70B.
+- The LLM scores **each criterion individually** (0 to `max_score`), then sums to a total.
 - The LLM returns structured JSON:
   ```json
   {
@@ -51,6 +62,8 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
     "feedback": "Solid implementation with correct logic. Code quality could be improved with better documentation and consistent formatting."
   }
   ```
+- `category_scores` must contain one entry per rubric criterion, and `marks` must equal their sum — this replaces vague totals with auditable subscores.
+- **Score validation**: After parsing, if the sum of `category_scores` doesn't match `marks`, the total is auto-corrected and a note is appended to deductions. This prevents LLM arithmetic errors from propagating into the report.
 - **Concurrency**: 4 submissions graded in parallel via ThreadPoolExecutor.
 - **Cache**: Each result is saved to `.grading_cache.json` immediately after completion. If the process crashes, the next run resumes from where it left off.
 - **Retry**: Failed API calls are retried with exponential backoff (2s → 4s → 8s, up to 3 attempts).
@@ -65,8 +78,9 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 ### Step 7: Report Generation
 - Results are written to `grading_report.xlsx` with two sheets:
-  - **Grading Report**: per-student data with dynamic category columns, pass/fail coloring, and plagiarism flags.
-  - **Summary Statistics**: class-level metrics (average, median, pass rate, grade distribution).
+  - **Grading Report**: per-student data with dynamic criterion columns, pass/fail coloring, and plagiarism flags.
+  - **Summary Statistics**: class-level metrics (average, median, pass rate, grade distribution) plus a **Class Insights** section.
+- **Class Insights**: All deduction reasons across all students are sent to the LLM in one call, which returns the top 3 most common mistakes. These are appended to the Summary Statistics sheet with gold highlighting. If the API call fails, the section is skipped silently.
 - The grading cache is cleared after successful report generation.
 
 ---
@@ -78,11 +92,13 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 | API rate limit | Exponential backoff retry (up to 3 attempts) |
 | Process crash mid-grading | Cache-based resume on next run |
 | Malformed LLM JSON response | Graceful fallback with "Error" mark and raw response snippet |
+| LLM total ≠ category sum | Auto-corrected to correct sum; note appended to deductions |
 | Unsupported file format in ZIP | Skipped silently, only supported formats processed |
 | Corrupt file in ZIP | Error message stored as content instead of crashing |
 | Unsafe ZIP entries (zip-slip) | Rejected with ValueError before extraction |
 | Vision API failure for an image | Skipped silently, text extraction continues |
 | Corrupt/unreadable embedded image | Skipped silently, other images still processed |
+| Class insights LLM call failure | Insights section omitted, report still generates |
 
 ---
 
@@ -123,3 +139,5 @@ streamlit run app.py
 4. **Concurrent grading**: Sequential grading of 60+ submissions is slow. ThreadPoolExecutor with 4 workers provides ~4x speedup while staying within Groq rate limits.
 5. **Config via .env**: Keeps secrets out of code, lets users tune thresholds without editing Python files.
 6. **Streamlit UI as a wrapper**: The web UI calls existing skill functions directly instead of duplicating logic, keeping a single source of truth for all grading behavior.
+7. **Rubric templates**: Pre-defined templates for common assignment types (programming, essay) reduce hallucination risk and improve consistency. The LLM fills in context-specific details rather than inventing the entire structure. Custom templates can be added by dropping a JSON file into `rubrics/`.
+8. **Post-parse score validation**: LLMs occasionally miscalculate sums. Auto-correcting `marks` to equal the actual `category_scores` sum ensures the report is always arithmetically consistent without requiring an extra API call.

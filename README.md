@@ -5,10 +5,10 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 ## What It Does
 
 - Accepts a **ZIP of student submissions** + an **assignment brief**
-- Generates a **grading rubric** via LLM (Groq / LLaMA 3.3 70B) with human approval
-- **Grades each submission** against the rubric — extracts name, ID, marks, deductions, feedback
+- Generates a **structured grading rubric** via LLM (Groq / LLaMA 3.3 70B) as validated JSON with per-criterion scoring — uses **rubric templates** when a matching assignment type is detected, human approval required
+- **Grades each submission** against the rubric — scores every criterion individually, then sums to a total with auditable subscores; **auto-corrects** if the LLM's total doesn't match the category sum
 - **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram)
-- Outputs a styled **Excel report** with per-category breakdown and class statistics
+- Outputs a styled **Excel report** with per-category breakdown, class statistics, and **LLM-generated class insights** (top 3 common mistakes)
 
 ## Project Structure
 
@@ -34,6 +34,10 @@ AutoGrader/
 ├── utils/                           # Shared utilities
 │   ├── cache.py                     # Crash-recovery grading cache
 │   └── retry.py                     # Exponential backoff for API calls
+│
+├── rubrics/                         # Rubric templates for common assignment types
+│   ├── programming_assignment.json  # Correctness, Code Quality, Documentation, Testing
+│   └── essay_assignment.json        # Argument, Evidence, Structure, Clarity
 │
 └── skills/                          # Core agent skills
     ├── rubric_generator/
@@ -120,8 +124,8 @@ All settings are in `.env` (see `.env.example`):
 
 Generates `grading_report.xlsx` with two sheets:
 
-1. **Grading Report** — Name, ID, Marks, Category Scores, Deductions, Feedback, Plagiarism Flag
-2. **Summary Statistics** — Average, Median, Std Dev, Pass Rate, Grade Distribution (A–F)
+1. **Grading Report** — Name, ID, Marks, Per-Criterion Scores, Deductions, Feedback, Plagiarism Flag
+2. **Summary Statistics** — Average, Median, Std Dev, Pass Rate, Grade Distribution (A–F), and a **Class Insights** section listing the top 3 most common mistakes across all students (generated via an additional LLM call)
 
 ## Tech Stack
 
@@ -131,3 +135,7 @@ Generates `grading_report.xlsx` with two sheets:
 - **Reports**: openpyxl with conditional formatting
 - **CLI UX**: Rich (progress bars, styled logging)
 - **Web UI**: Streamlit (interactive browser-based interface)
+
+## Author
+
+Muhammad Umar Farooq — [GitHub](https://github.com/omerfarooq223)

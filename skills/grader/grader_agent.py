@@ -44,13 +44,13 @@ def _call_llm(client: Groq, system_prompt: str, user_prompt: str) -> str:
 
 
 def _parse_json(raw: str, fallback_name: str) -> dict:
-    """Extract JSON from an LLM response, handling code fences."""
+    """Extract JSON from an LLM response, handling code fences, then validate scores."""
     text = raw
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
     try:
-        return json.loads(text)
+        result = json.loads(text)
     except json.JSONDecodeError:
         return {
             "name": fallback_name,
@@ -61,24 +61,46 @@ def _parse_json(raw: str, fallback_name: str) -> dict:
             "feedback": "",
         }
 
+    # Validate: category_scores sum must match marks
+    cat_scores = result.get("category_scores", {})
+    if cat_scores and isinstance(cat_scores, dict):
+        numeric_scores = [v for v in cat_scores.values() if isinstance(v, (int, float))]
+        if numeric_scores:
+            correct_sum = sum(numeric_scores)
+            marks = result.get("marks")
+            if isinstance(marks, (int, float)) and marks != correct_sum:
+                result["marks"] = correct_sum
+                deductions = result.get("deductions", "") or ""
+                correction = "[Auto-corrected: LLM total did not match category sum]"
+                result["deductions"] = f"{deductions} {correction}".strip()
+
+    return result
+
 
 SYSTEM_PROMPT = (
-    "You are an expert academic grader. You will receive a grading rubric "
-    "and a student submission. Your job is to:\n"
+    "You are an expert academic grader. You will receive a structured JSON "
+    "grading rubric and a student submission.\n\n"
+    "The rubric contains a 'criteria' array. Each criterion has a 'name', "
+    "'max_score', and 'description'.\n\n"
+    "Your job is to:\n"
     "1. Extract the student's name and ID from the submission text.\n"
-    "2. Grade the submission against EACH rubric category individually.\n"
-    "3. Provide an overall total mark.\n"
+    "2. Score the submission on EACH criterion individually. The score for "
+    "each criterion MUST be between 0 and that criterion's max_score.\n"
+    "3. Sum the individual criterion scores to produce the total marks.\n"
     "4. List any mark deductions with clear reasons.\n"
     "5. Write a brief 2-3 sentence qualitative feedback summary.\n\n"
     "Respond ONLY with valid JSON in this exact format:\n"
     "{\n"
     '  "name": "...",\n'
     '  "id": "...",\n'
-    '  "marks": <total number>,\n'
-    '  "category_scores": {"Category Name": <score>, ...},\n'
+    '  "marks": <total — must equal sum of category_scores>,\n'
+    '  "category_scores": {"Criterion Name": <score>, ...},\n'
     '  "deductions": "...",\n'
     '  "feedback": "..."\n'
-    "}\n"
+    "}\n\n"
+    "IMPORTANT: 'category_scores' must contain one entry for EVERY criterion "
+    "in the rubric, using the exact criterion name as the key. "
+    "'marks' must equal the sum of all values in 'category_scores'.\n"
     "If the name or ID cannot be found, use the filename as the name "
     'and "N/A" as the ID.'
 )

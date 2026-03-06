@@ -445,3 +445,6 @@ if st.session_state.rubric or st.session_state.results is not None:
             st.session_state[key] = val
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown("---")
+st.markdown("<p style='text-align: center; color: #94a3b8; font-size: 0.8rem;'>Built by Muhammad Umar Farooq</p>", unsafe_allow_html=True)

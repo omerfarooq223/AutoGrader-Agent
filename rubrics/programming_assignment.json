@@ -1,0 +1,11 @@
+{
+  "template_name": "Programming Assignment",
+  "match_keywords": ["code", "program", "implement", "function", "class", "algorithm", "software", "compile", "debug", "python", "java", "c++", "cpp", "javascript"],
+  "criteria": [
+    {"name": "Correctness", "max_score": 40, "description": ""},
+    {"name": "Code Quality", "max_score": 25, "description": ""},
+    {"name": "Documentation", "max_score": 15, "description": ""},
+    {"name": "Testing", "max_score": 10, "description": ""},
+    {"name": "Formatting & Style", "max_score": 10, "description": ""}
+  ]
+}
