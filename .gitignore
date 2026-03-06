@@ -1,0 +1,20 @@
+# Environment & secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Cache files (runtime artifacts)
+.grading_cache.json
+.rubric_cache.json
+
+# Output reports
+*.xlsx
