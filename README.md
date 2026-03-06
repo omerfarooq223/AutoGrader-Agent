@@ -1,6 +1,6 @@
 # AutoGrader
 
-AI-powered grading agent that automates assignment evaluation using LLMs.
+AI-powered grading agent that automates assignment evaluation using LLMs. Available as both a **CLI tool** and a **Streamlit web UI**.
 
 ## What It Does
 
@@ -14,12 +14,16 @@ AI-powered grading agent that automates assignment evaluation using LLMs.
 
 ```
 AutoGrader/
-├── main.py                          # Entry point — orchestrates the full pipeline
+├── main.py                          # CLI entry point — orchestrates the full pipeline
+├── app.py                           # Streamlit web UI
 ├── config.py                        # Centralized settings (.env loader)
 ├── requirements.txt                 # Python dependencies
 ├── .env.example                     # Environment variable template
 ├── README.md                        # This file
 ├── LICENSE                          # MIT License
+│
+├── .streamlit/
+│   └── config.toml                  # Streamlit theme configuration
 │
 ├── docs/
 │   └── workflow.md                  # Detailed pipeline documentation
@@ -73,8 +77,30 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env and add your GROQ_API_KEY
 
-# 3. Run
+# 3a. Run via CLI
 python main.py submissions.zip assignment_brief.pdf
+
+# 3b. Run via Web UI
+streamlit run app.py
+```
+
+## Web UI
+
+The Streamlit interface (`app.py`) provides a browser-based alternative to the CLI with a guided 4-step workflow:
+
+1. **Upload** — Drag-and-drop your submissions ZIP and assignment brief (PDF/DOCX)
+2. **Rubric** — Auto-generates a grading rubric from the brief; review, edit, or approve it
+3. **Grade** — Runs concurrent grading + plagiarism detection with a live progress bar
+4. **Results** — View a summary table and download the full Excel report
+
+The UI calls the same underlying skill modules as the CLI — no logic is duplicated.
+
+```bash
+# Start the web UI
+streamlit run app.py
+
+# Or specify the full path if streamlit isn't on PATH
+.venv/bin/streamlit run app.py
 ```
 
 ## Configuration
@@ -103,4 +129,5 @@ Generates `grading_report.xlsx` with two sheets:
 - **Vision**: Groq API → LLaMA 4 Scout 17B (image understanding for embedded images)
 - **Plagiarism**: scikit-learn TF-IDF + custom n-gram Jaccard
 - **Reports**: openpyxl with conditional formatting
-- **UX**: Rich (progress bars, styled logging)
+- **CLI UX**: Rich (progress bars, styled logging)
+- **Web UI**: Streamlit (interactive browser-based interface)

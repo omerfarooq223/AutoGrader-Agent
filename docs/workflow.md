@@ -86,6 +86,35 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 ---
 
+## Web UI (Streamlit)
+
+In addition to the CLI (`main.py`), AutoGrader provides a browser-based interface via `app.py`. The UI wraps the same skill modules — no grading logic is duplicated.
+
+### UI Workflow
+
+| Step | User Action | Backend Call |
+|------|-------------|-------------|
+| 1. Upload | Drag-and-drop ZIP + assignment brief | Files saved to a temp directory |
+| 2. Rubric | Review auto-generated rubric, edit or approve | `read_file()` → `generate_rubric()` |
+| 3. Grade | Click "Grade All" — progress bar shows completion | `extract_and_collect()` → `grade_all()` → `check_plagiarism()` → `apply_flags()` |
+| 4. Results | View summary table, download Excel report | `write_results()` → in-memory download via `st.download_button` |
+
+### Key Implementation Details
+
+- **Session state**: All intermediate data (brief text, rubric, results, report bytes) is stored in `st.session_state` so the page survives Streamlit reruns.
+- **Progress tracking**: `grade_all()` accepts an `on_complete` callback that increments a Streamlit progress bar after each submission is graded.
+- **Temp files**: Uploaded files are written to `tempfile.mkdtemp()` — cleaned up by the OS.
+- **No server-side file persistence**: The Excel report is held in memory as bytes and served via `st.download_button`. Nothing is written to the project directory.
+- **Reset**: A "Start Over" button clears all session state and reruns the app.
+
+### Running the Web UI
+
+```bash
+streamlit run app.py
+```
+
+---
+
 ## Design Decisions
 
 1. **Skills-based structure**: Each capability is isolated in its own directory with a SKILL.md describing its purpose, inputs, outputs, and dependencies.
@@ -93,3 +122,4 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 3. **Dual plagiarism detection**: Single-method detection has blind spots — cosine misses verbatim copy-paste, n-grams miss paraphrasing. Combined scoring covers both.
 4. **Concurrent grading**: Sequential grading of 60+ submissions is slow. ThreadPoolExecutor with 4 workers provides ~4x speedup while staying within Groq rate limits.
 5. **Config via .env**: Keeps secrets out of code, lets users tune thresholds without editing Python files.
+6. **Streamlit UI as a wrapper**: The web UI calls existing skill functions directly instead of duplicating logic, keeping a single source of truth for all grading behavior.
