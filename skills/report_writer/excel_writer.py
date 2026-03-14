@@ -92,10 +92,21 @@ def _auto_width(ws) -> None:
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
+        is_number_col = True
         for cell in col:
+            # Enable text wrap and set vertical alignment for all cells
+            cell.alignment = Alignment(wrap_text=True, vertical='top')
             if cell.value:
-                max_len = max(max_len, len(str(cell.value)))
-        ws.column_dimensions[col_letter].width = min(max_len + 4, 60)
+                val = cell.value
+                if not isinstance(val, (int, float)):
+                    is_number_col = False
+                max_len = max(max_len, len(str(val)))
+        # Set max width: 60 for text, 15 for numbers
+        max_width = 15 if is_number_col else 60
+        ws.column_dimensions[col_letter].width = min(max_len + 4, max_width)
+    # Set minimum row height to 30 for all rows
+    for row in ws.iter_rows():
+        ws.row_dimensions[row[0].row].height = max(ws.row_dimensions[row[0].row].height or 0, 30)
 
 
 def _collect_all_categories(results: list[dict]) -> list[str]:

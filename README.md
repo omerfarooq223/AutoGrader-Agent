@@ -10,6 +10,12 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 - **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram)
 - Outputs a styled **Excel report** with per-category breakdown, class statistics, and **LLM-generated class insights** (top 3 common mistakes)
 
+## Demo
+
+Below is a demo of the AutoGrader Streamlit UI in action:
+
+![Demo of AutoGrader UI](demo.gif)
+
 ## Project Structure
 
 ```

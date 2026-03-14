@@ -312,11 +312,25 @@ if zip_file and brief_file:
             st.rerun()
 
     if st.session_state.rubric and not st.session_state.rubric_approved:
-        edited = st.text_area(
-            "Review and edit the rubric:",
-            value=st.session_state.rubric,
-            height=400,
-        )
+        import json
+        rubric_text = st.session_state.rubric
+        if 'edit_rubric' not in st.session_state:
+            st.session_state.edit_rubric = False
+        edit_toggle = st.checkbox("Edit manually", value=st.session_state.edit_rubric)
+        st.session_state.edit_rubric = edit_toggle
+        edited = rubric_text
+        if not st.session_state.edit_rubric:
+            try:
+                rubric_data = json.loads(rubric_text)
+                st.markdown("### Grading Criteria")
+                for criterion in rubric_data.get("criteria", []):
+                    st.markdown(f"**{criterion['name']}** — {criterion['max_score']} marks")
+                    st.markdown(f"{criterion['description']}")
+                    st.markdown("---")
+            except Exception:
+                st.text_area("Review and edit the rubric:", value=rubric_text, height=300)
+        else:
+            edited = st.text_area("Review and edit the rubric:", value=rubric_text, height=300)
         c1, c2, _ = st.columns([1, 1, 2])
         with c1:
             if st.button("Approve", use_container_width=True):
@@ -331,7 +345,19 @@ if zip_file and brief_file:
     if st.session_state.rubric_approved:
         _status("Rubric approved and locked.", "success")
         with st.expander("View approved rubric"):
-            st.markdown(st.session_state.rubric)
+            import json
+            try:
+                rubric_obj = json.loads(st.session_state.rubric)
+                if isinstance(rubric_obj, dict) and "criteria" in rubric_obj:
+                    criteria = rubric_obj["criteria"]
+                    rubric_md = "| Criterion | Max Score | Description |\n|---|---|---|\n"
+                    for c in criteria:
+                        rubric_md += f"| {c.get('name','')} | {c.get('max_score','')} | {c.get('description','')} |\n"
+                    st.markdown(rubric_md)
+                else:
+                    st.markdown(st.session_state.rubric)
+            except Exception:
+                st.markdown(st.session_state.rubric)
 else:
     _status("Upload both files above to get started.", "info")
 

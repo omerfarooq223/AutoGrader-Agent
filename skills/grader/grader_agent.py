@@ -71,7 +71,7 @@ def _parse_json(raw: str, fallback_name: str) -> dict:
             if isinstance(marks, (int, float)) and marks != correct_sum:
                 result["marks"] = correct_sum
                 deductions = result.get("deductions", "") or ""
-                correction = "[Auto-corrected: LLM total did not match category sum]"
+                correction = "[Score adjusted to match rubric total]"
                 result["deductions"] = f"{deductions} {correction}".strip()
 
     return result
