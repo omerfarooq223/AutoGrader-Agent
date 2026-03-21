@@ -1,6 +1,6 @@
 """
 Excel writer utility — generates the final grading report with:
-  - Main grading sheet (Name, ID, Marks, Category Scores, Deductions, Feedback, Plagiarism)
+  - Main grading sheet (Name, ID, Marks, Category Scores, Deductions, Plagiarism)
   - Summary statistics sheet (avg, median, min, max, pass/fail, grade distribution)
   - Class insights section (top 3 common mistakes via LLM analysis)
 """
@@ -8,6 +8,7 @@ Excel writer utility — generates the final grading report with:
 import json
 import logging
 import os
+import re
 import statistics
 
 import openpyxl
@@ -24,13 +25,35 @@ logger = logging.getLogger(__name__)
 # ── Styling constants ───────────────────────────────────────────
 _HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
 _HEADER_FILL = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-_PASS_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-_FAIL_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-_FLAG_FONT = Font(color="FF0000", bold=True)
+_PASS_FILL   = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+_FAIL_FILL   = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+_FLAG_FONT   = Font(color="FF0000", bold=True)
 _THIN_BORDER = Border(
     left=Side(style="thin"), right=Side(style="thin"),
-    top=Side(style="thin"), bottom=Side(style="thin"),
+    top=Side(style="thin"),  bottom=Side(style="thin"),
 )
+
+
+def _shorten_flag(flag: str) -> str:
+    """
+    Convert a verbose plagiarism flag string like:
+      'Similar to A.docx (95.7%, cos=96% ngram=96%) | Similar to B.docx (...)'
+    into a compact summary like:
+      '⚠️ 2 match(es) found (max 96%)'
+    """
+    if not flag:
+        return ""
+    matches = [m.strip() for m in flag.split("|") if m.strip()]
+    if not matches:
+        return ""
+    percents = re.findall(r"(\d+(?:\.\d+)?)%", flag)
+    max_pct = max(float(p) for p in percents) if percents else 0
+    return f"⚠️ {len(matches)} match(es) found (max {max_pct:.0f}%)"
+
+
+def _clean_category_name(name: str) -> str:
+    """Strip leading/trailing brackets from category names."""
+    return name.strip("[]")
 
 
 def _generate_class_insights(results: list[dict]) -> list[str]:
@@ -94,19 +117,18 @@ def _auto_width(ws) -> None:
         col_letter = get_column_letter(col[0].column)
         is_number_col = True
         for cell in col:
-            # Enable text wrap and set vertical alignment for all cells
-            cell.alignment = Alignment(wrap_text=True, vertical='top')
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
             if cell.value:
                 val = cell.value
                 if not isinstance(val, (int, float)):
                     is_number_col = False
                 max_len = max(max_len, len(str(val)))
-        # Set max width: 60 for text, 15 for numbers
         max_width = 15 if is_number_col else 60
         ws.column_dimensions[col_letter].width = min(max_len + 4, max_width)
-    # Set minimum row height to 30 for all rows
     for row in ws.iter_rows():
-        ws.row_dimensions[row[0].row].height = max(ws.row_dimensions[row[0].row].height or 0, 30)
+        ws.row_dimensions[row[0].row].height = max(
+            ws.row_dimensions[row[0].row].height or 0, 30
+        )
 
 
 def _collect_all_categories(results: list[dict]) -> list[str]:
@@ -124,44 +146,52 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict]) -> None:
 
     categories = _collect_all_categories(results)
 
-    # Build headers dynamically
+    # Build headers — no brackets on category names, no Feedback column
     headers = ["Name", "ID", "Marks"]
-    headers += [f"[{c}]" for c in categories]
-    headers += ["Deductions / Reason", "Feedback", "Plagiarism Flag"]
+    headers += [_clean_category_name(c) for c in categories]
+    headers += ["Deductions / Reason", "Plagiarism Flag"]   # Feedback removed
 
     for col_idx, header in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col_idx, value=header)
-        cell.font = _HEADER_FONT
-        cell.fill = _HEADER_FILL
+        cell.font      = _HEADER_FONT
+        cell.fill      = _HEADER_FILL
         cell.alignment = Alignment(horizontal="center", wrap_text=True)
-        cell.border = _THIN_BORDER
+        cell.border    = _THIN_BORDER
 
     # Data rows
     for row_idx, entry in enumerate(results, start=2):
         col = 1
-        ws.cell(row=row_idx, column=col, value=entry.get("name", "")); col += 1
-        ws.cell(row=row_idx, column=col, value=entry.get("id", "")); col += 1
 
-        # Marks cell with pass/fail coloring
+        ws.cell(row=row_idx, column=col, value=entry.get("name", ""))
+        col += 1
+        ws.cell(row=row_idx, column=col, value=entry.get("id", ""))
+        col += 1
+
+        # Marks with pass/fail colouring
         marks = entry.get("marks", "")
-        marks_cell = ws.cell(row=row_idx, column=col, value=marks); col += 1
+        marks_cell = ws.cell(row=row_idx, column=col, value=marks)
+        col += 1
         if isinstance(marks, (int, float)):
             marks_cell.fill = _PASS_FILL if marks >= PASS_THRESHOLD else _FAIL_FILL
 
-        # Category scores
+        # Category scores — look up by original key (may have brackets)
         cat_scores = entry.get("category_scores", {})
         for cat in categories:
-            ws.cell(row=row_idx, column=col, value=cat_scores.get(cat, "")); col += 1
+            ws.cell(row=row_idx, column=col, value=cat_scores.get(cat, ""))
+            col += 1
 
-        ws.cell(row=row_idx, column=col, value=entry.get("deductions", "")); col += 1
-        ws.cell(row=row_idx, column=col, value=entry.get("feedback", "")); col += 1
+        # Deductions
+        ws.cell(row=row_idx, column=col, value=entry.get("deductions", ""))
+        col += 1
 
-        flag = entry.get("plagiarism_flag", "")
-        flag_cell = ws.cell(row=row_idx, column=col, value=flag)
-        if flag:
+        # Plagiarism flag — shortened
+        raw_flag  = entry.get("plagiarism_flag", "")
+        short_flag = _shorten_flag(raw_flag)
+        flag_cell  = ws.cell(row=row_idx, column=col, value=short_flag)
+        if short_flag:
             flag_cell.font = _FLAG_FONT
 
-        # Apply border to all cells in this row
+        # Borders on all cells in this row
         for c in range(1, col + 1):
             ws.cell(row=row_idx, column=c).border = _THIN_BORDER
 
@@ -172,36 +202,49 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict]) -> tuple:
     """Write a Summary Statistics sheet. Returns (worksheet, last_row)."""
     ws = wb.create_sheet("Summary Statistics")
 
-    # Collect numeric marks
-    marks = [r["marks"] for r in results if isinstance(r.get("marks"), (int, float))]
+    marks         = [r["marks"] for r in results if isinstance(r.get("marks"), (int, float))]
     total_students = len(results)
+    error_entries  = [r for r in results if r.get("marks") == "Error"]
 
     stats_data = [
-        ("Total Submissions", total_students),
+        ("Total Submissions",      total_students),
         ("Graded (numeric marks)", len(marks)),
+        ("Grading errors",         len(error_entries)),
     ]
+
+    # List filenames that failed
+    if error_entries:
+        stats_data.append(("", ""))
+        stats_data.append(("Failed Submissions", "Filename"))
+        for r in error_entries:
+            stats_data.append(("", r.get("filename", r.get("name", "unknown"))))
 
     if marks:
         passed = sum(1 for m in marks if m >= PASS_THRESHOLD)
         stats_data += [
             ("", ""),
-            ("Average", round(statistics.mean(marks), 2)),
-            ("Median", round(statistics.median(marks), 2)),
+            ("Average",       round(statistics.mean(marks), 2)),
+            ("Median",        round(statistics.median(marks), 2)),
             ("Std Deviation", round(statistics.stdev(marks), 2) if len(marks) > 1 else "N/A"),
-            ("Minimum", min(marks)),
-            ("Maximum", max(marks)),
+            ("Minimum",       min(marks)),
+            ("Maximum",       max(marks)),
             ("", ""),
-            (f"Passed (≥ {PASS_THRESHOLD})", passed),
-            (f"Failed (< {PASS_THRESHOLD})", len(marks) - passed),
-            ("Pass Rate", f"{passed / len(marks) * 100:.1f}%"),
+            (f"Passed (≥ {PASS_THRESHOLD})",  passed),
+            (f"Failed (< {PASS_THRESHOLD})",  len(marks) - passed),
+            ("Pass Rate",     f"{passed / len(marks) * 100:.1f}%"),
         ]
 
-        # Grade distribution (A/B/C/D/F based on percentage of TOTAL_MARKS)
-        buckets = {"A (≥90%)": 0, "B (80-89%)": 0, "C (70-79%)": 0, "D (60-69%)": 0, "F (<60%)": 0}
+        buckets = {
+            "A (≥90%)":  0,
+            "B (80-89%)": 0,
+            "C (70-79%)": 0,
+            "D (60-69%)": 0,
+            "F (<60%)":   0,
+        }
         for m in marks:
             pct = (m / TOTAL_MARKS) * 100 if TOTAL_MARKS else 0
             if pct >= 90:
-                buckets["A (≥90%)"] += 1
+                buckets["A (≥90%)"]   += 1
             elif pct >= 80:
                 buckets["B (80-89%)"] += 1
             elif pct >= 70:
@@ -209,26 +252,25 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict]) -> tuple:
             elif pct >= 60:
                 buckets["D (60-69%)"] += 1
             else:
-                buckets["F (<60%)"] += 1
+                buckets["F (<60%)"]   += 1
 
         stats_data.append(("", ""))
         stats_data.append(("Grade Distribution", "Count"))
         for grade, count in buckets.items():
             stats_data.append((grade, count))
 
-    # Write to sheet
-    header_labels = ["Metric", "Value"]
-    for col_idx, h in enumerate(header_labels, start=1):
+    # Write headers
+    for col_idx, h in enumerate(["Metric", "Value"], start=1):
         cell = ws.cell(row=1, column=col_idx, value=h)
-        cell.font = _HEADER_FONT
-        cell.fill = _HEADER_FILL
+        cell.font   = _HEADER_FONT
+        cell.fill   = _HEADER_FILL
         cell.border = _THIN_BORDER
 
     for row_idx, (metric, value) in enumerate(stats_data, start=2):
         ws.cell(row=row_idx, column=1, value=metric).border = _THIN_BORDER
-        ws.cell(row=row_idx, column=2, value=value).border = _THIN_BORDER
+        ws.cell(row=row_idx, column=2, value=value).border  = _THIN_BORDER
 
-    last_row = len(stats_data) + 1  # +1 for header row
+    last_row = len(stats_data) + 1
     _auto_width(ws)
     return ws, last_row
 
@@ -238,29 +280,29 @@ def _write_insights_section(ws, start_row: int, insights: list[str]) -> None:
     if not insights:
         return
 
-    _INSIGHT_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    _INSIGHT_FILL = PatternFill(
+        start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"
+    )
 
-    row = start_row + 1  # blank separator row
-    # Section header
-    row += 1
+    row = start_row + 2  # blank separator
     cell = ws.cell(row=row, column=1, value="Class Insights — Top 3 Common Mistakes")
-    cell.font = Font(bold=True, size=11, color="7F6000")
-    cell.fill = _INSIGHT_FILL
+    cell.font   = Font(bold=True, size=11, color="7F6000")
+    cell.fill   = _INSIGHT_FILL
     cell.border = _THIN_BORDER
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
     ws.cell(row=row, column=2).border = _THIN_BORDER
-    ws.cell(row=row, column=2).fill = _INSIGHT_FILL
+    ws.cell(row=row, column=2).fill   = _INSIGHT_FILL
 
     for i, insight in enumerate(insights, start=1):
         row += 1
-        ws.cell(row=row, column=1, value=f"#{i}").border = _THIN_BORDER
-        ws.cell(row=row, column=2, value=insight).border = _THIN_BORDER
+        ws.cell(row=row, column=1, value=f"#{i}").border  = _THIN_BORDER
+        ws.cell(row=row, column=2, value=insight).border  = _THIN_BORDER
 
 
 def write_results(results: list[dict], output_path: str = "results.xlsx") -> str:
     """
     Write grading results to an Excel file with two sheets:
-      1. Grading Report — per-student results
+      1. Grading Report   — per-student results (no Feedback column)
       2. Summary Statistics — class-level stats + class insights
 
     Returns the path to the written file.
@@ -269,7 +311,6 @@ def write_results(results: list[dict], output_path: str = "results.xlsx") -> str
     _write_grading_sheet(wb, results)
     ws_stats, last_row = _write_stats_sheet(wb, results)
 
-    # Generate and append class insights
     insights = _generate_class_insights(results)
     if insights:
         _write_insights_section(ws_stats, last_row, insights)

@@ -72,7 +72,6 @@ def extract_zip(zip_path: str, extract_to: str | None = None) -> str:
         extract_to = tempfile.mkdtemp(prefix="submissions_")
 
     with zipfile.ZipFile(zip_path, "r") as zf:
-        # Guard against zip-slip: reject entries with absolute paths or '..'
         for member in zf.namelist():
             member_path = os.path.normpath(member)
             if member_path.startswith("..") or os.path.isabs(member_path):
@@ -89,7 +88,6 @@ def read_pdf(file_path: str) -> str:
         for page in doc:
             page_text = page.get_text() or ""
 
-            # Extract embedded images from the page
             for img_info in page.get_images(full=True):
                 xref = img_info[0]
                 try:
@@ -112,7 +110,6 @@ def read_docx(file_path: str) -> str:
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     text = "\n".join(paragraphs)
 
-    # Extract images from the docx media folder
     try:
         for rel in doc.part.rels.values():
             if "image" in rel.reltype:
@@ -155,17 +152,15 @@ def read_notebook(file_path: str) -> str:
             parts.append(f"[Markdown]\n{source}")
         elif cell_type == "code":
             parts.append(f"[Code]\n{source}")
-        # Skip raw / other cell types
 
     return "\n\n".join(parts).strip()
 
 
-# Map extensions to their reader functions
 _READERS = {
-    ".pdf": read_pdf,
-    ".docx": read_docx,
-    ".py": read_text_file,
-    ".cpp": read_text_file,
+    ".pdf":   read_pdf,
+    ".docx":  read_docx,
+    ".py":    read_text_file,
+    ".cpp":   read_text_file,
     ".ipynb": read_notebook,
 }
 
@@ -179,24 +174,42 @@ def read_file(file_path: str) -> str:
     return reader(file_path)
 
 
-def collect_submissions(directory: str) -> list[dict]:
+def collect_submissions(
+    directory: str,
+    exclude_filenames: list[str] | None = None,
+) -> list[dict]:
     """
     Walk through an extracted submissions directory and read every
     supported file.
 
-    Returns a list of dicts:
-        [{"filename": "...", "path": "...", "content": "..."}, ...]
+    Parameters
+    ----------
+    directory         : Path to the extracted ZIP directory.
+    exclude_filenames : Optional list of filenames to skip (e.g. answer key).
+
+    Returns
+    -------
+    list[dict] — [{"filename": "...", "path": "...", "content": "..."}, ...]
     """
+    exclude_set = {f.lower() for f in (exclude_filenames or [])}
     submissions: list[dict] = []
 
     for root, _dirs, files in os.walk(directory):
-        # Skip hidden directories (e.g., __MACOSX)
-        if any(part.startswith(".") or part.startswith("__") for part in Path(root).parts):
+        # Skip hidden / system directories
+        if any(
+            part.startswith(".") or part.startswith("__")
+            for part in Path(root).parts
+        ):
             continue
 
         for filename in sorted(files):
             ext = Path(filename).suffix.lower()
             if ext not in SUPPORTED_EXTENSIONS:
+                continue
+
+            # Skip answer key or any other excluded file
+            if filename.lower() in exclude_set:
+                logger.info("Skipping excluded file: %s", filename)
                 continue
 
             full_path = os.path.join(root, filename)
@@ -207,20 +220,28 @@ def collect_submissions(directory: str) -> list[dict]:
 
             submissions.append({
                 "filename": filename,
-                "path": full_path,
-                "content": content,
+                "path":     full_path,
+                "content":  content,
             })
 
     return submissions
 
 
-def extract_and_collect(zip_path: str) -> list[dict]:
+def extract_and_collect(
+    zip_path: str,
+    exclude_filenames: list[str] | None = None,
+) -> list[dict]:
     """
-    Convenience function: extract a ZIP file, then collect and read
-    all supported submissions inside it. Cleans up the temp directory afterwards.
+    Convenience function: extract a ZIP file, collect and read all supported
+    submissions inside it, then clean up the temp directory.
+
+    Parameters
+    ----------
+    zip_path          : Path to the ZIP file.
+    exclude_filenames : Optional filenames to exclude (e.g. answer key filename).
     """
     extract_dir = extract_zip(zip_path)
     try:
-        return collect_submissions(extract_dir)
+        return collect_submissions(extract_dir, exclude_filenames=exclude_filenames)
     finally:
         shutil.rmtree(extract_dir, ignore_errors=True)

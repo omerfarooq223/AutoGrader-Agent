@@ -58,8 +58,7 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
     "id": "22F-1234",
     "marks": 82,
     "category_scores": {"Correctness": 30, "Code Quality": 22, "Documentation": 15, "Formatting": 15},
-    "deductions": "-8: Missing error handling in main function. -5: No docstrings. -5: Inconsistent indentation.",
-    "feedback": "Solid implementation with correct logic. Code quality could be improved with better documentation and consistent formatting."
+    "deductions": "-8: Missing error handling in main function. -5: No docstrings. -5: Inconsistent indentation."
   }
   ```
 - `category_scores` must contain one entry per rubric criterion, and `marks` must equal their sum — this replaces vague totals with auditable subscores.
@@ -78,8 +77,8 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 ### Step 7: Report Generation
 - Results are written to `grading_report.xlsx` with two sheets:
-  - **Grading Report**: per-student data with dynamic criterion columns, pass/fail coloring, and plagiarism flags.
-  - **Summary Statistics**: class-level metrics (average, median, pass rate, grade distribution) plus a **Class Insights** section.
+  - **Grading Report**: per-student data with dynamic criterion columns, pass/fail coloring, and plagiarism flags. (No feedback column.)
+  - **Summary Statistics**: class-level metrics (average, median, pass rate, grade distribution) plus a **Class Insights** section (top 3 mistakes via LLM).
 - **Class Insights**: All deduction reasons across all students are sent to the LLM in one call, which returns the top 3 most common mistakes. These are appended to the Summary Statistics sheet with gold highlighting. If the API call fails, the section is skipped silently.
 - The grading cache is cleared after successful report generation.
 
@@ -98,46 +97,7 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 | Unsafe ZIP entries (zip-slip) | Rejected with ValueError before extraction |
 | Vision API failure for an image | Skipped silently, text extraction continues |
 | Corrupt/unreadable embedded image | Skipped silently, other images still processed |
-| Class insights LLM call failure | Insights section omitted, report still generates |
-
----
-
-## Web UI (Streamlit)
-
-In addition to the CLI (`main.py`), AutoGrader provides a browser-based interface via `app.py`. The UI wraps the same skill modules — no grading logic is duplicated.
-
-### UI Workflow
-
-| Step | User Action | Backend Call |
-|------|-------------|-------------|
-| 1. Upload | Drag-and-drop ZIP + assignment brief | Files saved to a temp directory |
-| 2. Rubric | Review auto-generated rubric, edit or approve | `read_file()` → `generate_rubric()` |
-| 3. Grade | Click "Grade All" — progress bar shows completion | `extract_and_collect()` → `grade_all()` → `check_plagiarism()` → `apply_flags()` |
-| 4. Results | View summary table, download Excel report | `write_results()` → in-memory download via `st.download_button` |
-
-### Key Implementation Details
-
-- **Session state**: All intermediate data (brief text, rubric, results, report bytes) is stored in `st.session_state` so the page survives Streamlit reruns.
-- **Progress tracking**: `grade_all()` accepts an `on_complete` callback that increments a Streamlit progress bar after each submission is graded.
-- **Temp files**: Uploaded files are written to `tempfile.mkdtemp()` — cleaned up by the OS.
-- **No server-side file persistence**: The Excel report is held in memory as bytes and served via `st.download_button`. Nothing is written to the project directory.
-- **Reset**: A "Start Over" button clears all session state and reruns the app.
-
-### Running the Web UI
-
-```bash
-streamlit run app.py
-```
-
----
-
-## Design Decisions
-
-1. **Skills-based structure**: Each capability is isolated in its own directory with a SKILL.md describing its purpose, inputs, outputs, and dependencies.
-2. **Cache separation**: Rubric cache (`.rubric_cache.json`) is intentional reuse; grading cache (`.grading_cache.json`) is automatic crash recovery that self-cleans.
-3. **Dual plagiarism detection**: Single-method detection has blind spots — cosine misses verbatim copy-paste, n-grams miss paraphrasing. Combined scoring covers both.
-4. **Concurrent grading**: Sequential grading of 60+ submissions is slow. ThreadPoolExecutor with 4 workers provides ~4x speedup while staying within Groq rate limits.
-5. **Config via .env**: Keeps secrets out of code, lets users tune thresholds without editing Python files.
-6. **Streamlit UI as a wrapper**: The web UI calls existing skill functions directly instead of duplicating logic, keeping a single source of truth for all grading behavior.
-7. **Rubric templates**: Pre-defined templates for common assignment types (programming, essay) reduce hallucination risk and improve consistency. The LLM fills in context-specific details rather than inventing the entire structure. Custom templates can be added by dropping a JSON file into `rubrics/`.
-8. **Post-parse score validation**: LLMs occasionally miscalculate sums. Auto-correcting `marks` to equal the actual `category_scores` sum ensures the report is always arithmetically consistent without requiring an extra API call.
+````
+<userPrompt>
+Provide the fully rewritten file, incorporating the suggested code change. You must produce the complete file.
+</userPrompt>

@@ -6,9 +6,10 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 
 - Accepts a **ZIP of student submissions** + an **assignment brief**
 - Generates a **structured grading rubric** via LLM (Groq / LLaMA 3.3 70B) as validated JSON with per-criterion scoring — uses **rubric templates** when a matching assignment type is detected, human approval required
+- Lets you provide or generate an **answer key/solution** (manual, file upload, or LLM-generated) for accurate grading
 - **Grades each submission** against the rubric — scores every criterion individually, then sums to a total with auditable subscores; **auto-corrects** if the LLM's total doesn't match the category sum
 - **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram)
-- Outputs a styled **Excel report** with per-category breakdown, class statistics, and **LLM-generated class insights** (top 3 common mistakes)
+- Outputs a styled **Excel report** with per-criterion breakdown, class statistics, and **LLM-generated class insights** (top 3 common mistakes)
 
 ## Demo
 
@@ -96,12 +97,13 @@ streamlit run app.py
 
 ## Web UI
 
-The Streamlit interface (`app.py`) provides a browser-based alternative to the CLI with a guided 4-step workflow:
+The Streamlit interface (`app.py`) provides a browser-based alternative to the CLI with a guided 5-step workflow:
 
-1. **Upload** — Drag-and-drop your submissions ZIP and assignment brief (PDF/DOCX)
-2. **Rubric** — Auto-generates a grading rubric from the brief; review, edit, or approve it
-3. **Grade** — Runs concurrent grading + plagiarism detection with a live progress bar
-4. **Results** — View a summary table and download the full Excel report
+1. **Upload** — Drag-and-drop your submissions ZIP and assignment brief
+2. **Rubric** — Auto-detects template, generates rubric via LLM, or lets you paste/edit manually; review, edit, or approve
+3. **Answer Key** — Provide manually, upload a file, or generate via LLM
+4. **Grade** — Runs concurrent grading + plagiarism detection with a live progress bar
+5. **Results** — View a summary table (no feedback column), download the Excel report, and see "Class Insights" (top 3 mistakes)
 
 The UI calls the same underlying skill modules as the CLI — no logic is duplicated.
 
@@ -130,8 +132,8 @@ All settings are in `.env` (see `.env.example`):
 
 Generates `grading_report.xlsx` with two sheets:
 
-1. **Grading Report** — Name, ID, Marks, Per-Criterion Scores, Deductions, Feedback, Plagiarism Flag
-2. **Summary Statistics** — Average, Median, Std Dev, Pass Rate, Grade Distribution (A–F), and a **Class Insights** section listing the top 3 most common mistakes across all students (generated via an additional LLM call)
+1. **Grading Report** — Name, ID, Marks, [Criterion columns], Deductions, Plagiarism Flag
+2. **Summary Statistics** — Average, Median, Std Dev, Pass Rate, Grade Distribution (A–F), **Class Insights** (top 3 mistakes)
 
 ## Tech Stack
 

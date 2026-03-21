@@ -25,9 +25,8 @@ Generates the final Excel grading report with styled formatting, per-criterion b
 | Name | Extracted from submission |
 | ID | Extracted from submission |
 | Marks | Total score (green = pass, red = fail) |
-| [Category ...] | Dynamic columns from rubric categories |
+| [Criterion ...] | Dynamic columns from rubric criteria |
 | Deductions / Reason | LLM-generated deduction details |
-| Feedback | Qualitative feedback summary |
 | Plagiarism Flag | Similarity details (red bold if flagged) |
 
 ### Sheet 2: Summary Statistics
