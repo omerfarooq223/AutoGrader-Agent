@@ -14,15 +14,44 @@ import json
 import logging
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from groq import Groq
 
-from config import MODEL, MAX_CONCURRENT_GRADES
+from config import (
+    MODEL,
+    MAX_CONCURRENT_GRADES,
+    GRADING_MAX_OUTPUT_TOKENS,
+    MAX_SUBMISSION_CHARS,
+    MAX_ANSWER_KEY_CHARS,
+    MAX_RUBRIC_CHARS,
+)
 from utils.retry import retry_api_call
 from utils.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
+
+
+def _trim_text(text: str, max_chars: int, label: str) -> str:
+    """
+    Trim long prompt sections to reduce token spend on free-tier plans.
+    Keeps both head and tail because conclusions often appear at the end.
+    """
+    # max_chars <= 0 disables truncation.
+    if max_chars <= 0:
+        return text
+    if not text or len(text) <= max_chars:
+        return text
+    if max_chars < 200:
+        return text[:max_chars]
+    head = int(max_chars * 0.7)
+    tail = max_chars - head
+    return (
+        f"{text[:head]}\n\n"
+        f"[{label} truncated to save tokens. {len(text) - max_chars} chars omitted.]\n\n"
+        f"{text[-tail:]}"
+    )
 
 
 def _get_client() -> Groq:
@@ -32,10 +61,10 @@ def _get_client() -> Groq:
     return Groq(api_key=api_key)
 
 
-def _call_llm(client: Groq, system_prompt: str, user_prompt: str) -> str:
+def _call_llm(client: Groq, system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> str:
     """Make a single Groq chat completion call."""
-    raw = call_llm(system_prompt, user_prompt)
-    return response.choices[0].message.content.strip()
+    raw = call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
+    return raw
 
 
 def _clean_name(raw_name: str, filename: str) -> str:
@@ -148,6 +177,7 @@ def grade_submission(
     submission_text: str,
     filename: str,
     answer_key: str = None,
+    cancel_event: threading.Event = None,
 ) -> dict:
     """
     Grade a single student submission with retry logic.
@@ -156,23 +186,35 @@ def grade_submission(
     client = _get_client()
 
     if answer_key:
+        rubric_text = _trim_text(rubric, MAX_RUBRIC_CHARS, "Rubric")
+        answer_key_text = _trim_text(answer_key, MAX_ANSWER_KEY_CHARS, "Answer key")
+        submission_for_llm = _trim_text(submission_text, MAX_SUBMISSION_CHARS, "Submission")
         prompt = (
             "Compare this student submission to the provided answer key "
             "and grade using the rubric.\n\n"
-            f"Grading Rubric:\n{rubric}\n\n"
-            f"Answer Key / Model Solution:\n{answer_key}\n\n"
+            f"Grading Rubric:\n{rubric_text}\n\n"
+            f"Answer Key / Model Solution:\n{answer_key_text}\n\n"
             f"Submission Filename: {filename}\n\n"
-            f"Submission Content:\n{submission_text}"
+            f"Submission Content:\n{submission_for_llm}"
         )
     else:
+        rubric_text = _trim_text(rubric, MAX_RUBRIC_CHARS, "Rubric")
+        submission_for_llm = _trim_text(submission_text, MAX_SUBMISSION_CHARS, "Submission")
         prompt = (
             "Grade this student submission using the rubric only.\n\n"
-            f"Grading Rubric:\n{rubric}\n\n"
+            f"Grading Rubric:\n{rubric_text}\n\n"
             f"Submission Filename: {filename}\n\n"
-            f"Submission Content:\n{submission_text}"
+            f"Submission Content:\n{submission_for_llm}"
         )
 
-    raw = retry_api_call(_call_llm, client, SYSTEM_PROMPT, prompt)
+    raw = retry_api_call(
+        _call_llm,
+        client,
+        SYSTEM_PROMPT,
+        prompt,
+        cancel_event=cancel_event,
+        max_tokens=GRADING_MAX_OUTPUT_TOKENS,
+    )
     return _parse_json(raw, filename)
 
 
@@ -217,18 +259,32 @@ def grade_all(
     total = len(submissions)
     done  = len(results)
 
+    pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GRADES)
+    cancel_event = threading.Event()
+
+    import time
     def _grade_one(sub: dict) -> dict:
+        if cancel_event.is_set():
+            raise InterruptedError("Cancelled")
+        
+        # Artificially throttle API calls to prevent rate limits.
+        # Since MAX_CONCURRENT_GRADES=1 and grading itself takes time, 1.5s is safe.
+        time.sleep(1.5)
+        
         result = grade_submission(
             rubric,
             sub["content"],
             sub["filename"],
             answer_key=answer_key,
+            cancel_event=cancel_event,
         )
         result["filename"] = sub["filename"]
         return result
 
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GRADES) as pool:
-        future_map = {pool.submit(_grade_one, sub): sub for sub in to_grade}
+    pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GRADES)
+    future_map = {pool.submit(_grade_one, sub): sub for sub in to_grade}
+    
+    try:
         for future in as_completed(future_map):
             done += 1
             sub = future_map[future]
@@ -249,5 +305,10 @@ def grade_all(
             logger.info("Graded [%d/%d]: %s", done, total, sub["filename"])
             if on_complete:
                 on_complete(sub["filename"], result)
+    finally:
+        # Ensures that if Streamlit interrupts this via a button click (Stop Grading),
+        # it doesn't freeze waiting for pending futures to finish, and cascades the termination into sleep loops.
+        cancel_event.set()
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return results

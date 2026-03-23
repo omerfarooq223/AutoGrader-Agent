@@ -18,7 +18,7 @@ from skills.file_extractor.extractor import extract_and_collect, read_file
 from skills.rubric_generator.rubric_agent import generate_rubric
 from skills.grader.grader_agent import grade_all
 from skills.plagiarism_detector.plagiarism_agent import check_plagiarism, apply_flags
-from skills.report_writer.excel_writer import write_results
+from skills.report_writer.excel_writer import write_results, shorten_plagiarism_flag
 
 # ── Page config (must be first Streamlit call) ──────────────────
 st.set_page_config(page_title="AutoGrader", page_icon="📝", layout="wide")
@@ -26,10 +26,12 @@ st.set_page_config(page_title="AutoGrader", page_icon="📝", layout="wide")
 # ── Session state defaults ──────────────────────────────────────
 _DEFAULTS = dict(
     rubric_approved=False,
+    answer_key_approved=False,
     answer_key_final=None,
     answer_key_file=None,
     answer_key_uploaded_filename=None,
     rubric=None,
+    class_insights=None,
     results=None,
     report_bytes=None,
     brief_text=None,
@@ -41,6 +43,7 @@ _DEFAULTS = dict(
     answer_key_auto_text="",
     answer_key_mode="manual",
     rubric_mode="manual",
+    grading_in_progress=False,
 )
 
 for k, v in _DEFAULTS.items():
@@ -232,6 +235,51 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(2) .stButton > button[kind=
     border-color: #94a3b8 !important;
     box-shadow: none;
 }
+
+/* ── Stepper ────────────────────────────────────────────────── */
+.ag-stepper {
+    display: flex;
+    gap: 12px;
+    margin: 1rem 0 1.2rem 0;
+    flex-wrap: wrap;
+}
+.ag-step {
+    flex: 1;
+    min-width: 160px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 0.65rem 0.85rem;
+    position: relative;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+.ag-step .k {
+    font-size: 0.7rem;
+    color: #64748b;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.35px;
+}
+.ag-step .v {
+    font-size: 0.95rem;
+    font-weight: 800;
+    color: #0f172a;
+    margin-top: 0.25rem;
+}
+.ag-step .pill {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    font-size: 0.7rem;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    font-weight: 800;
+}
+.ag-step.done { border-color: #22c55e; }
+.ag-step.done .pill { background: #dcfce7; color: #166534; }
+.ag-step.active { border-color: #3b82f6; }
+.ag-step.active .pill { background: #dbeafe; color: #1d4ed8; }
+.ag-step.todo .pill { background: #f1f5f9; color: #475569; }
 </style>""", unsafe_allow_html=True)
 
 # ── Header ──────────────────────────────────────────────────────
@@ -291,18 +339,70 @@ if not config.GROQ_API_KEY:
     )
     st.stop()
 
+if config.EXTRACT_IMAGES:
+    _status(
+        "Image extraction is enabled (<code>EXTRACT_IMAGES=True</code>). "
+        "This can consume Gemini quota quickly. Disable it unless your files contain important diagrams/screenshots.",
+        "warn",
+    )
+
+
+# Variables initialization from session state for early UI components
+zip_file = st.session_state.get("zip_uploader")
+brief_file = st.session_state.get("brief_uploader")
+
+# ── Stepper (Top Progress Bar) ──────────────────────────────────
+upload_done = bool(zip_file and brief_file)
+active_step = (
+    5
+    if st.session_state.results is not None
+    else 4
+    if upload_done and st.session_state.rubric_approved and st.session_state.answer_key_approved and st.session_state.results is None
+    else 3
+    if upload_done and st.session_state.rubric_approved
+    else 2
+    if upload_done
+    else 1
+)
+steps = [
+    (1, "Upload files", upload_done),
+    (2, "Rubric", st.session_state.rubric_approved),
+    (3, "Answer key", st.session_state.answer_key_approved),
+    (4, "Grade", st.session_state.results is not None),
+    (5, "Results", st.session_state.results is not None),
+]
+stepper_html = '<div class="ag-stepper">'
+for idx, title, done in steps:
+    status = "done" if done else "active" if idx == active_step else "todo"
+    pill = "Done" if done else "In progress" if idx == active_step else "To do"
+    stepper_html += (
+        f'<div class="ag-step {status}">'
+        f'<div class="k">Step {idx}</div>'
+        f'<div class="v">{title}</div>'
+        f'<div class="pill">{pill}</div>'
+        f'</div>'
+    )
+stepper_html += "</div>"
+st.markdown(stepper_html, unsafe_allow_html=True)
+_divider()
 
 # ── Step 1 — Upload Files ───────────────────────────────────────
 _step(1, "Upload Files", "Upload your submissions ZIP and assignment brief.")
 col1, col2 = st.columns(2)
 with col1:
-    zip_file = st.file_uploader("Submissions ZIP", type=["zip"])
+    zip_file_new = st.file_uploader("Submissions ZIP", type=["zip"], key="zip_uploader")
 with col2:
-    brief_file = st.file_uploader("Assignment Brief", type=["pdf", "docx"])
+    brief_file_new = st.file_uploader("Assignment Brief", type=["pdf", "docx"], key="brief_uploader")
+
+# Sync file references
+if zip_file_new: zip_file = zip_file_new
+if brief_file_new: brief_file = brief_file_new
+upload_done = bool(zip_file and brief_file)
 
 _divider()
 
 # ── Step 2 — Grading Rubric ─────────────────────────────────────
+_divider()
 _step(2, "Grading Rubric", "Choose how to provide the grading rubric.")
 
 if zip_file and brief_file:
@@ -388,6 +488,8 @@ if zip_file and brief_file:
             st.rerun()
 
         if st.session_state.rubric and not st.session_state.rubric_approved:
+            if "rubric_edit_textarea" in st.session_state:
+                st.session_state.rubric = st.session_state.rubric_edit_textarea
             try:
                 rubric_data = json.loads(st.session_state.rubric)
                 st.markdown("### Grading Criteria")
@@ -400,7 +502,9 @@ if zip_file and brief_file:
                     "Review and edit the rubric:",
                     value=st.session_state.rubric,
                     height=300,
+                    key="rubric_edit_textarea",
                 )
+                st.session_state.rubric = st.session_state.rubric_edit_textarea
             st.markdown(
                 "<span style='color:#f59e0b; font-size:0.85em;'>"
                 "AI-generated rubric — accuracy depends on assignment type. "
@@ -430,13 +534,19 @@ if zip_file and brief_file:
                     st.markdown(st.session_state.rubric)
             except Exception:
                 st.markdown(st.session_state.rubric)
+    else:
+        _status("Upload both files in **Step 1** to unlock rubric controls.", "info")
 else:
-    _status("Upload both files above to get started.", "info")
+    _status("Upload both files in **Step 1** to unlock rubric controls.", "info")
+
+
 
 # ── Step 3 — Answer Key ─────────────────────────────────────────
+_divider()
+_step(3, "Answer Key", "Provide an answer key to improve grading accuracy.")
+
 if st.session_state.rubric_approved:
-    _divider()
-    _step(3, "Answer Key", "Provide an answer key to improve grading accuracy.")
+
 
     answer_key_mode = st.radio(
         "How would you like to provide the answer key?",
@@ -458,8 +568,8 @@ if st.session_state.rubric_approved:
             key="answer_key_manual_textarea",
         )
         uploaded_ak = st.file_uploader(
-            "Or upload answer key file (PDF, DOCX, image):",
-            type=["pdf", "docx", "png", "jpg", "jpeg"],
+            "Or upload answer key file (PDF, DOCX, PY, CPP, IPYNB):",
+            type=["pdf", "docx", "py", "cpp", "ipynb"],
             key="answer_key_file_uploader",
         )
         if uploaded_ak:
@@ -487,24 +597,27 @@ if st.session_state.rubric_approved:
                     st.session_state.brief_text = read_file(tmp_path)
                 finally:
                     os.unlink(tmp_path)
-            from skills.rubric_generator.rubric_agent import _get_client
-            client = _get_client()
-            with st.spinner("Generating answer key…"):
-                response = client.chat.completions.create(
-                    model=config.MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are an expert academic assistant. Given the assignment brief, generate a thorough model answer or solution key.",
-                        },
-                        {"role": "user", "content": st.session_state.brief_text},
-                    ],
-                    temperature=0.2,
-                    max_tokens=2048,
+            if not st.session_state.brief_text.strip():
+                st.error(
+                    "Error: Could not extract any readable text from the assignment brief. "
+                    "If this is a scanned/image-only document, you must temporarily set **EXTRACT_IMAGES=True** "
+                    "in your `.env` file for the AI to read it."
                 )
-                st.session_state.answer_key_auto_text = response.choices[0].message.content.strip()
-                st.session_state.answer_key_final = st.session_state.answer_key_auto_text
-            st.rerun()
+            else:
+                from utils.llm_client import call_llm
+                with st.spinner("Generating answer key… (this uses the LLM fallback engine)"):
+                    try:
+                        sys_prompt = "You are an expert academic assistant. Given the assignment brief, generate a thorough model answer or solution key."
+                        result = call_llm(
+                            system_prompt=sys_prompt,
+                            user_prompt=st.session_state.brief_text,
+                            max_tokens=2048
+                        )
+                        st.session_state.answer_key_auto_text = result
+                        st.session_state.answer_key_final = result
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Generation failed: {e}")
 
         if st.session_state.answer_key_auto_text:
             st.text_area(
@@ -513,6 +626,10 @@ if st.session_state.rubric_approved:
                 height=180,
                 key="answer_key_auto_display",
             )
+            # Keep the grading input in sync with user edits.
+            if not st.session_state.answer_key_approved:
+                st.session_state.answer_key_auto_text = st.session_state.answer_key_auto_display
+                st.session_state.answer_key_final = st.session_state.answer_key_auto_display
             st.markdown(
                 "<span style='color:#f59e0b; font-size:0.85em;'>"
                 "AI-generated answer key may be incorrect for code, math, or diagram assignments. "
@@ -522,16 +639,41 @@ if st.session_state.rubric_approved:
             )
 
     if st.session_state.answer_key_final:
-        _status("Answer key ready.", "success")
+        if not st.session_state.answer_key_approved:
+            _status("Review the answer key and click Approve to proceed.", "info")
+            if st.button("Approve Answer Key", key="approve_answer_key"):
+                st.session_state.answer_key_approved = True
+                st.rerun()
+        else:
+            _status("Answer key approved and locked.", "success")
     else:
-        _status("Provide or generate an answer key to proceed.", "info")
+        _status("The rubric is approved! Now provide or generate an answer key to proceed.", "info")
+else:
+    _status("Step locked. Approve the grading rubric in **Step 2** to unlock.", "info")
+
+
 
 # ── Step 4 — Grade Submissions ──────────────────────────────────
 _divider()
 _step(4, "Grade Submissions", "Each submission is graded against the rubric and answer key, then checked for plagiarism.")
 
-if st.session_state.rubric_approved and zip_file and st.session_state.results is None:
-    if st.button("Start Grading"):
+if st.session_state.rubric_approved and st.session_state.answer_key_approved and zip_file and st.session_state.results is None:
+    if st.session_state.grading_in_progress:
+        # Show a cancel button while grading is happening
+        if st.button("Cancel Grading", type="secondary", use_container_width=True):
+            st.session_state.grading_in_progress = False
+            st.rerun()
+
+    c1, c2 = st.columns([2, 8])
+    with c1:
+        start_btn = st.button(
+            "Start Grading",
+            use_container_width=True,
+            disabled=st.session_state.grading_in_progress,
+        )
+
+    if start_btn:
+        st.session_state.grading_in_progress = True
         tmp_zip = _save_temp(zip_file, ".zip")
         try:
             with st.spinner("Extracting submissions…"):
@@ -547,9 +689,12 @@ if st.session_state.rubric_approved and zip_file and st.session_state.results is
             _status(f"Found <strong>{len(submissions)}</strong> submission(s). Grading…", "info")
 
             progress = st.progress(0, text="Grading submissions…")
+            log_area = st.empty()
+            
             lock = threading.Lock()
             done = {"n": 0}
             total = len(submissions)
+            logs = []
 
             def _on_complete(filename: str, _result: dict):
                 with lock:
@@ -558,6 +703,9 @@ if st.session_state.rubric_approved and zip_file and st.session_state.results is
                         done["n"] / total,
                         text=f"Graded {done['n']}/{total} — {filename}",
                     )
+                    score = _result.get("marks", "Error")
+                    logs.append(f"✓ {filename} — Score: {score}")
+                    log_area.code("\n".join(logs[-10:]), language="text")
 
             results = grade_all(
                 st.session_state.rubric,
@@ -573,17 +721,26 @@ if st.session_state.rubric_approved and zip_file and st.session_state.results is
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xl:
                 report_path = tmp_xl.name
-            write_results(results, report_path)
+            _, insights = write_results(results, report_path, return_insights=True)
+            st.session_state.class_insights = insights
 
             st.session_state.results = results
             st.session_state.report_bytes = Path(report_path).read_bytes()
             os.unlink(report_path)
             st.rerun()
         finally:
+            st.session_state.grading_in_progress = False
             os.unlink(tmp_zip)
 
+
+elif st.session_state.results is not None:
+    _status("Grading complete. View results below.", "success")
+elif not zip_file or not brief_file:
+    _status("Step locked. Complete **Step 1** to unlock.", "info")
 elif not st.session_state.rubric_approved:
-    _status("Approve the rubric first to start grading.", "info")
+    _status("Step locked. Approve the rubric in **Step 2** to unlock.", "info")
+elif not st.session_state.answer_key_approved:
+    _status("Step locked. Approve the answer key in **Step 3** to unlock.", "info")
 
 # ── Step 5 — Results ────────────────────────────────────────────
 if st.session_state.results is not None:
@@ -611,6 +768,11 @@ if st.session_state.results is not None:
 
     st.write("")
 
+    if st.session_state.class_insights:
+        with st.expander("Class Insights (Top 3 Common Mistakes)", expanded=False):
+            for i, insight in enumerate(st.session_state.class_insights, start=1):
+                st.markdown(f"**{i}.** {insight}")
+
     df = pd.DataFrame(results)
     cols = ["name", "id", "marks"]
     all_cats = sorted({c for r in results for c in r.get("category_scores", {})})
@@ -620,7 +782,11 @@ if st.session_state.results is not None:
         )
         cols.insert(3 + i, cat)
     cols += ["deductions", "plagiarism_flag"]
-    st.dataframe(df[[c for c in cols if c in df.columns]], use_container_width=True)
+    table_cols = [c for c in cols if c in df.columns]
+    if "plagiarism_flag" in table_cols:
+        df["plagiarism_flag"] = df["plagiarism_flag"].apply(shorten_plagiarism_flag)
+    with st.expander("View detailed grading table", expanded=True):
+        st.dataframe(df[table_cols], use_container_width=True, hide_index=True)
 
     st.write("")
     st.download_button(

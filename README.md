@@ -25,42 +25,39 @@ AutoGrader/
 ├── app.py                           # Streamlit web UI
 ├── config.py                        # Centralized settings (.env loader)
 ├── requirements.txt                 # Python dependencies
+├── .env                             # Local Secrets (Gitignored)
 ├── .env.example                     # Environment variable template
 ├── README.md                        # This file
 ├── LICENSE                          # MIT License
-│
+├── demo.gif                         # UI Demonstration
 ├── .streamlit/
 │   └── config.toml                  # Streamlit theme configuration
-│
 ├── docs/
 │   └── workflow.md                  # Detailed pipeline documentation
-│
 ├── tests/
 │   └── test_autograder.py           # Test suite (pytest)
-│
 ├── utils/                           # Shared utilities
 │   ├── cache.py                     # Crash-recovery grading cache
+│   ├── llm_client.py                # Redundant LLM dual-routing API wrapper
 │   └── retry.py                     # Exponential backoff for API calls
-│
 ├── rubrics/                         # Rubric templates for common assignment types
-│   ├── programming_assignment.json  # Correctness, Code Quality, Documentation, Testing
-│   └── essay_assignment.json        # Argument, Evidence, Structure, Clarity
-│
+│   ├── programming_assignment.json  # Correctness, Code Quality, etc.
+│   └── essay_assignment.json        # Argument, Evidence, etc.
 └── skills/                          # Core agent skills
     ├── rubric_generator/
-    │   ├── SKILL.md                 # Agent instructions
+    │   ├── SKILL.md                 # Agent instructions (Self-Correcting Rubric)
     │   └── rubric_agent.py          # LLM rubric generation + approval loop
     ├── grader/
-    │   ├── SKILL.md                 # Agent instructions
+    │   ├── SKILL.md                 # Agent instructions (Concurrency & Accuracy)
     │   └── grader_agent.py          # Concurrent LLM grading engine
     ├── plagiarism_detector/
-    │   ├── SKILL.md                 # Agent instructions
+    │   ├── SKILL.md                 # Agent instructions (Similarity Logic)
     │   └── plagiarism_agent.py      # Dual similarity analysis
     ├── file_extractor/
-    │   ├── SKILL.md                 # Agent instructions
+    │   ├── SKILL.md                 # Agent instructions (Parsing Logic)
     │   └── extractor.py             # ZIP extraction + 5-format readers
     └── report_writer/
-        ├── SKILL.md                 # Agent instructions
+        ├── SKILL.md                 # Agent instructions (Export Logic)
         └── excel_writer.py          # Styled Excel report generator
 ```
 
@@ -76,7 +73,7 @@ AutoGrader/
 
 ### Image Extraction
 
-Embedded images in PDF and DOCX files are automatically extracted and sent to Groq's vision model (`meta-llama/llama-4-scout-17b-16e-instruct`) for description. Each description is appended to the document text as `[Image: <description>]`, giving the grading LLM full visibility into diagrams, charts, code output screenshots, and handwritten content. If the vision API fails for any image, it is skipped silently — extraction never crashes.
+Embedded images in PDF and DOCX files can be automatically extracted and sent to Gemini's vision model for description by enabling `EXTRACT_IMAGES=True` in your `.env`. Each description is appended to the document text as `[Image: <description>]`, giving the grading LLM full visibility into diagrams, charts, code output screenshots, and handwritten content. If the vision API fails for any image, it is skipped silently — extraction never crashes.
 
 ## Quick Start
 
@@ -84,9 +81,9 @@ Embedded images in PDF and DOCX files are automatically extracted and sent to Gr
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Set up your API key
+# 2. Set up your API keys
 cp .env.example .env
-# Edit .env and add your GROQ_API_KEY
+# Edit .env and add your GROQ_API_KEY and GEMINI_API_KEY
 
 # 3a. Run via CLI
 python main.py submissions.zip assignment_brief.pdf
@@ -121,28 +118,21 @@ All settings are in `.env` (see `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GROQ_API_KEY` | — | Your Groq API key |
-| `MODEL` | `llama-3.3-70b-versatile` | LLM model to use |
-| `MAX_CONCURRENT_GRADES` | `4` | Parallel grading workers |
-| `SIMILARITY_THRESHOLD` | `0.65` | Plagiarism flag threshold |
-| `TOTAL_MARKS` | `100` | Maximum marks for grading |
-| `PASS_THRESHOLD` | `50` | Pass/fail cutoff |
-
-## Output
-
-Generates `grading_report.xlsx` with two sheets:
-
-1. **Grading Report** — Name, ID, Marks, [Criterion columns], Deductions, Plagiarism Flag
-2. **Summary Statistics** — Average, Median, Std Dev, Pass Rate, Grade Distribution (A–F), **Class Insights** (top 3 mistakes)
+| `GROQ_API_KEY` | — | Your Groq API key (**Primary — recommended**) |
+| `GEMINI_API_KEY` | — | Your Gemini API key (Secondary fallback) |
+| `MODEL` | `llama-3.3-70b-versatile` | Primary Groq model |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Fallback Gemini model |
+| `EXTRACT_IMAGES` | `False` | Turn on to extract and describe images |
+| `MAX_CONCURRENT_GRADES` | `1` | Parallel grading workers |
 
 ## Tech Stack
 
-- **LLM**: Groq API → LLaMA 3.3 70B Versatile (128K context)
-- **Vision**: Groq API → LLaMA 4 Scout 17B (image understanding for embedded images)
-- **Plagiarism**: scikit-learn TF-IDF + custom n-gram Jaccard
-- **Reports**: openpyxl with conditional formatting
-- **CLI UX**: Rich (progress bars, styled logging)
-- **Web UI**: Streamlit (interactive browser-based interface)
+- **LLM Engine**: Dual-Redundant Routing (**Groq Llama 3.3 70B** as primary, **Gemini 2.0 Flash** as fallback)
+- **Vision**: Gemini API (for diagram understanding in PDFs/DOCX)
+- **Plagiarism**: Scikit-Learn (TF-IDF) + Character N-Gram Jaccard
+- **Reports**: Styled Excel output with `openpyxl`
+- **Frontend**: Streamlit 
+- **CLI**: Rich-enhanced python scripting
 
 ## Author
 

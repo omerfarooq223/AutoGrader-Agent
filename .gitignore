@@ -3,14 +3,22 @@
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 .venv/
 venv/
+ENV/
+env/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
 
 # Cache files (runtime artifacts)
 .grading_cache.json
@@ -18,3 +26,9 @@ venv/
 
 # Output reports
 *.xlsx
+
+# Local debug scripts (optional but excluded for safety)
+debug_gemini.py
+list_models.py
+quota_test.py
+check_gemini.py

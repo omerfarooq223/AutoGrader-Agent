@@ -1,9 +1,8 @@
 """
-LLM Client — unified interface for Groq (primary) and Gemini (fallback).
+LLM Client — unified interface for Gemini (primary) and Groq (fallback).
 
-Groq is used first. If a rate limit (429) or daily token exhaustion error
-is encountered, the client automatically falls back to Gemini Flash,
-which has a much larger free-tier limit (1.5M tokens/day).
+Gemini is used first. If Gemini fails (quota/rate/availability/model access),
+the client automatically falls back to Groq.
 
 Usage:
     from utils.llm_client import call_llm
@@ -36,13 +35,19 @@ def _call_groq(system_prompt: str, user_prompt: str, model: str, max_tokens: int
 
 
 # ── Gemini ───────────────────────────────────────────────────────
-def _call_gemini(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+def _call_gemini(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+    model_name: str | None = None,
+) -> str:
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
     except ImportError:
         raise ImportError(
-            "google-generativeai is not installed. "
-            "Run: pip install google-generativeai"
+            "google-genai is not installed. "
+            "Run: pip install google-genai"
         )
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -50,16 +55,25 @@ def _call_gemini(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
             "GEMINI_API_KEY not set. "
             "Get a free key at https://aistudio.google.com/app/apikey"
         )
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        system_instruction=system_prompt,
-    )
-    response = model.generate_content(
-        user_prompt,
-        generation_config={"max_output_tokens": max_tokens, "temperature": 0.2},
+    # Remove GOOGLE_API_KEY so the SDK doesn't silently override our key
+    os.environ.pop("GOOGLE_API_KEY", None)
+    client = genai.Client(api_key=api_key)
+    import config
+    selected_model = model_name or config.GEMINI_MODEL
+    print(f"DEBUG: Calling Gemini with model='{selected_model}'")
+    logger.info("Calling Gemini with model: %s", selected_model)
+    
+    response = client.models.generate_content(
+        model=selected_model,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            max_output_tokens=max_tokens,
+            temperature=0.2,
+        ),
     )
     return response.text.strip()
+
 
 
 # ── Unified entry point ──────────────────────────────────────────
@@ -71,42 +85,29 @@ def call_llm(
 ) -> str:
     import config
     groq_model = model or config.MODEL
-    groq_error_msg = None
-
-    # Try Groq first
+    gemini_models = [config.GEMINI_MODEL, "gemini-2.0-flash", "gemini-flash-latest"]
+    
+    # Try Groq first — it's proven reliable and fast in this region
     try:
-        return _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
-    except Exception as groq_err:
-        err_str = str(groq_err).lower()
-        is_rate_limit = (
-            "429" in str(groq_err)
-            or "rate_limit" in err_str
-            or "tokens per day" in err_str
-        )
-        groq_error_msg = str(groq_err)  # save before exception var is deleted
-
-        if is_rate_limit:
-            logger.warning(
-                "Groq rate limit hit — falling back to Gemini Flash. Error: %s",
-                groq_error_msg,
-            )
-        else:
-            raise
-
-    # Gemini fallback
-    try:
-        result = _call_gemini(system_prompt, user_prompt, max_tokens)
-        logger.info("Gemini fallback succeeded.")
+        result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
+        logger.info("Groq call succeeded with model: %s", groq_model)
         return result
-    except EnvironmentError as gemini_key_err:
-        raise RuntimeError(
-            "Groq rate limit reached and GEMINI_API_KEY is not set. "
-            "Either wait for Groq quota to reset, or add GEMINI_API_KEY to your .env file. "
-            "Get a free Gemini key at https://aistudio.google.com/app/apikey"
-        ) from gemini_key_err
-    except Exception as gemini_err:
-        raise RuntimeError(
-            f"Both Groq and Gemini failed.\n"
-            f"Groq error: {groq_error_msg}\n"
-            f"Gemini error: {gemini_err}"
-        ) from gemini_err
+    except Exception as groq_err:
+        logger.warning("Groq failed, trying Gemini fallbacks: %s", groq_err)
+        last_error = groq_err
+
+    # Gemini fallbacks
+    for gem_model in gemini_models:
+        try:
+            result = _call_gemini(system_prompt, user_prompt, max_tokens, model_name=gem_model)
+            logger.info("Gemini fallback succeeded with model: %s", gem_model)
+            return result
+        except Exception as gemini_err:
+            logger.debug("Gemini fallback %s failed: %s", gem_model, gemini_err)
+            continue
+
+    raise RuntimeError(
+        f"All models failed.\n"
+        f"Groq error: {last_error}\n"
+        "Gemini models also exceeded quota or were unavailable."
+    )

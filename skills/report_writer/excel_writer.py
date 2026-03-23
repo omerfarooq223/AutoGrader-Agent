@@ -7,16 +7,15 @@ Excel writer utility — generates the final grading report with:
 
 import json
 import logging
-import os
 import re
 import statistics
 
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
-from groq import Groq
 
-from config import PASS_THRESHOLD, TOTAL_MARKS, MODEL
+from config import PASS_THRESHOLD, TOTAL_MARKS
+from utils.llm_client import call_llm
 from utils.retry import retry_api_call
 
 logger = logging.getLogger(__name__)
@@ -51,6 +50,23 @@ def _shorten_flag(flag: str) -> str:
     return f"⚠️ {len(matches)} match(es) found (max {max_pct:.0f}%)"
 
 
+def shorten_plagiarism_flag(flag: str) -> str:
+    """
+    Public wrapper used by the UI to shorten plagiarism flag strings.
+    """
+    if flag is None:
+        return ""
+    if not isinstance(flag, str):
+        try:
+            flag = str(flag)
+        except Exception:
+            return ""
+    # Common pandas missing value representation
+    if flag.strip().lower() == "nan":
+        return ""
+    return _shorten_flag(flag)
+
+
 def _clean_category_name(name: str) -> str:
     """Strip leading/trailing brackets from category names."""
     return name.strip("[]")
@@ -70,13 +86,6 @@ def _generate_class_insights(results: list[dict]) -> list[str]:
 
     combined = "\n---\n".join(deductions)
 
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        logger.warning("GROQ_API_KEY not set; skipping class insights.")
-        return []
-
-    client = Groq(api_key=api_key)
-
     system_prompt = (
         "You are an academic analytics assistant. You will receive mark deduction "
         "reasons from multiple student submissions.\n\n"
@@ -87,16 +96,11 @@ def _generate_class_insights(results: list[dict]) -> list[str]:
     )
 
     def _call():
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Deduction reasons:\n\n{combined}"},
-            ],
-            temperature=0.2,
+        raw = call_llm(
+            system_prompt=system_prompt,
+            user_prompt=f"Deduction reasons:\n\n{combined}",
             max_tokens=512,
         )
-        raw = response.choices[0].message.content.strip()
         text = raw
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -108,6 +112,14 @@ def _generate_class_insights(results: list[dict]) -> list[str]:
     except Exception:
         logger.warning("Failed to generate class insights; skipping.", exc_info=True)
         return []
+
+
+def generate_class_insights(results: list[dict]) -> list[str]:
+    """
+    Public wrapper so the UI can render the same "Class Insights" section
+    without duplicating logic.
+    """
+    return _generate_class_insights(results)
 
 
 def _auto_width(ws) -> None:
@@ -299,7 +311,11 @@ def _write_insights_section(ws, start_row: int, insights: list[str]) -> None:
         ws.cell(row=row, column=2, value=insight).border  = _THIN_BORDER
 
 
-def write_results(results: list[dict], output_path: str = "results.xlsx") -> str:
+def write_results(
+    results: list[dict],
+    output_path: str = "results.xlsx",
+    return_insights: bool = False,
+) -> str | tuple[str, list[str]]:
     """
     Write grading results to an Excel file with two sheets:
       1. Grading Report   — per-student results (no Feedback column)
@@ -311,10 +327,12 @@ def write_results(results: list[dict], output_path: str = "results.xlsx") -> str
     _write_grading_sheet(wb, results)
     ws_stats, last_row = _write_stats_sheet(wb, results)
 
-    insights = _generate_class_insights(results)
+    insights = generate_class_insights(results)
     if insights:
         _write_insights_section(ws_stats, last_row, insights)
         _auto_width(ws_stats)
 
     wb.save(output_path)
+    if return_insights:
+        return output_path, insights
     return output_path

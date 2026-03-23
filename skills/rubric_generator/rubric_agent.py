@@ -213,6 +213,8 @@ def refine_rubric_descriptions(rubric_json: str) -> str:
         _parse_rubric_json(raw)
         return raw
 
+    return retry_api_call(_call)
+
 
 def save_rubric(rubric: str, base_dir: str = ".") -> None:
     """Persist the approved rubric to disk for reuse."""

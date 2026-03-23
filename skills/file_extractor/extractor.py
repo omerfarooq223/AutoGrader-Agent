@@ -31,39 +31,33 @@ _VISION_PROMPT = (
 
 
 def _describe_image(image_bytes: bytes) -> str | None:
-    """Send an image to Groq's vision model and return the description."""
+    """Send an image to Gemini's vision model to bypass strict Groq quotas."""
     try:
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        client = Groq(api_key=config.GROQ_API_KEY)
+        import os
+        from google import genai
+        from google.genai import types
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return None
+        os.environ.pop("GOOGLE_API_KEY", None)
+        client = genai.Client(api_key=api_key)
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
         def _call():
-            return client.chat.completions.create(
-                model=_VISION_MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{b64}",
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": _VISION_PROMPT,
-                            },
-                        ],
-                    }
-                ],
-                max_tokens=512,
+            return client.models.generate_content(
+                model=model_name,
+                contents=[
+                    _VISION_PROMPT,
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                ]
             )
 
         response = retry_api_call(_call)
-        return response.choices[0].message.content.strip()
-    except Exception:
-        logger.debug("Vision API call failed for an image, skipping.", exc_info=True)
+        return response.text.strip()
+    except Exception as e:
+        logger.debug(f"Vision API call failed for an image: {e}", exc_info=True)
         return None
+
 
 
 def extract_zip(zip_path: str, extract_to: str | None = None) -> str:
@@ -88,16 +82,17 @@ def read_pdf(file_path: str) -> str:
         for page in doc:
             page_text = page.get_text() or ""
 
-            for img_info in page.get_images(full=True):
-                xref = img_info[0]
-                try:
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    description = _describe_image(image_bytes)
-                    if description:
-                        page_text += f"\n[Image: {description}]"
-                except Exception:
-                    logger.debug("Failed to extract PDF image xref=%s, skipping.", xref, exc_info=True)
+            if config.EXTRACT_IMAGES:
+                for img_info in page.get_images(full=True):
+                    xref = img_info[0]
+                    try:
+                        base_image = doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        description = _describe_image(image_bytes)
+                        if description:
+                            page_text += f"\n[Image: {description}]"
+                    except Exception:
+                        logger.debug("Failed to extract PDF image xref=%s, skipping.", xref, exc_info=True)
 
             if page_text.strip():
                 text_parts.append(page_text)
@@ -110,18 +105,19 @@ def read_docx(file_path: str) -> str:
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     text = "\n".join(paragraphs)
 
-    try:
-        for rel in doc.part.rels.values():
-            if "image" in rel.reltype:
-                try:
-                    image_bytes = rel.target_part.blob
-                    description = _describe_image(image_bytes)
-                    if description:
-                        text += f"\n[Image: {description}]"
-                except Exception:
-                    logger.debug("Failed to extract DOCX image, skipping.", exc_info=True)
-    except Exception:
-        logger.debug("Failed to iterate DOCX relationships, skipping images.", exc_info=True)
+    if config.EXTRACT_IMAGES:
+        try:
+            for rel in doc.part.rels.values():
+                if "image" in rel.reltype:
+                    try:
+                        image_bytes = rel.target_part.blob
+                        description = _describe_image(image_bytes)
+                        if description:
+                            text += f"\n[Image: {description}]"
+                    except Exception:
+                        logger.debug("Failed to extract DOCX image, skipping.", exc_info=True)
+        except Exception:
+            logger.debug("Failed to iterate DOCX relationships, skipping images.", exc_info=True)
 
     return text.strip()
 
