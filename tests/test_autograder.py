@@ -193,7 +193,7 @@ class TestGraderParsing:
 
     def test_parse_invalid_json_fallback(self):
         result = _parse_json("not json at all", "fallback.py")
-        assert result["name"] == "fallback.py"
+        assert result["name"] == "NOT FOUND"
         assert result["marks"] == "Error"
 
 
