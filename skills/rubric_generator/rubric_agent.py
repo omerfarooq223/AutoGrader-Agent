@@ -68,7 +68,8 @@ def _scale_rubric_criteria(rubric: dict, total_marks: int) -> dict:
     diff = total_marks - sum(c["max_score"] for c in scaled)
     if diff != 0:
         idx = max(range(len(scaled)), key=lambda i: scaled[i]["max_score"])
-        scaled[idx]["max_score"] += diff
+        # type: ignore (Pyre thinks scaled is a strict TypedDict and won't allow reassignment of max_score here)
+        scaled[idx]["max_score"] = int(scaled[idx]["max_score"]) + diff
     return {"criteria": scaled}
 
 
@@ -108,16 +109,46 @@ def _get_client() -> Groq:
 def _parse_rubric_json(raw: str) -> dict:
     """Extract and validate the structured rubric JSON from LLM output."""
     text = raw.strip()
+    # Strip markdown code fences if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    rubric = json.loads(text)
+
+    # Try direct parse first
+    try:
+        rubric = json.loads(text)
+    except json.JSONDecodeError:
+        # Extract the first top-level JSON object via brace matching
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("No JSON object found in LLM response.")
+        depth, end = 0, start
+        for i, ch in enumerate(text[start:], start):  # type: ignore
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        rubric = json.loads(text[start:end + 1])      # type: ignore
     if "criteria" not in rubric or not isinstance(rubric["criteria"], list):
         raise ValueError("Rubric JSON missing 'criteria' list.")
     for item in rubric["criteria"]:
         if not all(k in item for k in ("name", "max_score", "description")):
             raise ValueError(f"Criterion missing required keys: {item}")
-        if not isinstance(item["max_score"], (int, float)) or item["max_score"] <= 0:
-            raise ValueError(f"Invalid max_score for '{item['name']}': {item['max_score']}")
+        
+        # Robustly handle max_score (cast strings to float, handle None)
+        try:
+            val = item["max_score"]
+            if val is None:
+                item["max_score"] = 1.0
+            else:
+                item["max_score"] = float(val)
+        except (ValueError, TypeError):
+            item["max_score"] = 1.0
+            
+        if item["max_score"] <= 0:
+            item["max_score"] = 1.0
     return rubric
 
 
@@ -191,24 +222,32 @@ def generate_rubric(brief_text: str) -> str:
     return json.dumps(rubric_dict, indent=2, ensure_ascii=False)
 
 
-def refine_rubric_descriptions(rubric_json: str) -> str:
+def format_rubric_to_json(rubric_text: str) -> str:
     """
-    Send a rubric to the LLM to improve descriptions only.
-    Criterion names and mark allocations are never changed.
+    Send a rubric (in any format: JSON, CSV, plain text) to the LLM to
+    extract it into a standardized JSON rubric.
+    Never rewrite or change the names, allocations, or descriptions.
     """
     client = _get_client()
 
     system_prompt = (
         "You are an expert academic grading assistant. "
-        "Improve the clarity and specificity of the rubric descriptions below. "
-        "Do NOT change any criterion names or max_score values. "
-        "Only rewrite the description of each criterion to be more specific, "
-        "measurable, and useful for grading. "
-        "Return the same JSON structure with only descriptions improved. "
-        "No markdown, no extra text."
+        "You will receive a grading rubric in any format (JSON, CSV table, "
+        "plain text, markdown, etc.).\n\n"
+        "Your job is to strictly parse it into a standardized JSON format.\n"
+        "1. Identify every criterion, its maximum possible score, and its description.\n"
+        "2. Keep the EXACT criterion names and wording unchanged.\n"
+        "3. If the rubric has multiple columns for different performance levels (e.g., 'Full Marks', 'Partial', 'Minimal' or '5 pts', '3 pts', '1 pt'):\n"
+        "   - Use the HIGHEST score found for that criterion as the 'max_score'.\n"
+        "   - MERGE all the level descriptions into the single 'description' field.\n"
+        "   - Use labels to keep it organized, e.g., '[5 Marks]: ... [3 Marks]: ... [1 Mark]: ...'\n"
+        "4. If a criterion is missing a mark allocation entirely, default it to 1.\n\n"
+        "Respond ONLY with valid JSON — no markdown, no extra text:\n"
+        '{"criteria": [{"name": "...", "max_score": <number>, '
+        '"description": "..."}, ...]}'
     )
 
-    def _call(sp=system_prompt, up=rubric_json):
+    def _call(sp=system_prompt, up=rubric_text):
         raw = call_llm(sp, up)
         _parse_rubric_json(raw)
         return raw
@@ -267,3 +306,4 @@ def approve_rubric(rubric: str) -> str:
             return ""
         else:
             print("Please enter A, E, or R.")
+    return ""

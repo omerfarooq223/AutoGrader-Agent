@@ -24,27 +24,28 @@ from skills.report_writer.excel_writer import write_results, shorten_plagiarism_
 st.set_page_config(page_title="AutoGrader", page_icon="📝", layout="wide")
 
 # ── Session state defaults ──────────────────────────────────────
-_DEFAULTS = dict(
-    rubric_approved=False,
-    answer_key_approved=False,
-    answer_key_final=None,
-    answer_key_file=None,
-    answer_key_uploaded_filename=None,
-    rubric=None,
-    class_insights=None,
-    results=None,
-    report_bytes=None,
-    brief_text=None,
-    rubric_manual_text="",
-    rubric_refined=False,
-    rubric_refined_text="",
-    rubric_refine_view=False,
-    answer_key_manual_text="",
-    answer_key_auto_text="",
-    answer_key_mode="manual",
-    rubric_mode="manual",
-    grading_in_progress=False,
-)
+_DEFAULTS = {
+    "rubric_approved": False,
+    "answer_key_approved": False,
+    "answer_key_final": None,
+    "answer_key_file": None,
+    "answer_key_uploaded_filename": None,
+    "rubric": None,
+    "class_insights": None,
+    "results": None,
+    "report_bytes": None,
+    "brief_text": None,
+    "rubric_manual_text": "",
+    "rubric_refined": False,
+    "rubric_refined_text": "",
+    "rubric_refine_view": False,
+    "answer_key_manual_text": "",
+    "answer_key_auto_text": "",
+    "answer_key_mode": "manual",
+    "rubric_mode": "manual",
+    "grading_in_progress": False,
+    "rubric_key_v": 0,
+}
 
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -406,115 +407,129 @@ _divider()
 _step(2, "Grading Rubric", "Choose how to provide the grading rubric.")
 
 if zip_file and brief_file:
-    rubric_mode = st.radio(
-        "How would you like to provide the rubric?",
-        ["Provide manually", "Generate automatically"],
-        index=0,
-        format_func=lambda x: (
-            "Provide manually  (Recommended — produces more consistent results)"
-            if x == "Provide manually" else x
-        ),
-        key="rubric_mode_radio",
-    )
-    st.session_state.rubric_mode = "manual" if rubric_mode == "Provide manually" else "auto"
-
-    if st.session_state.rubric_mode == "manual":
-        st.markdown(
-            "<span style='color:#64748b; font-size:0.85em;'>"
-            "Manual rubric is recommended for technical, math, and diagram-based assignments"
-            "</span>",
-            unsafe_allow_html=True,
+    if not st.session_state.rubric_approved:
+        rubric_mode = st.radio(
+            "How would you like to provide the rubric?",
+            ["Provide manually", "Generate automatically"],
+            index=0,
+            format_func=lambda x: (
+                "Provide manually  (Recommended — produces more consistent results)"
+                if x == "Provide manually" else x
+            ),
+            key="rubric_mode_radio",
         )
-        st.session_state.rubric_manual_text = st.text_area(
-            "Paste your rubric (any format):",
-            value=st.session_state.rubric_manual_text,
-            height=220,
-            key="rubric_manual_textarea",
-        )
+        st.session_state.rubric_mode = "manual" if rubric_mode == "Provide manually" else "auto"
 
-        if st.session_state.rubric_manual_text.strip():
-            # Refinement
-            if not st.session_state.rubric_refined:
-                if st.button("Refine with AI"):
-                    from skills.rubric_generator.rubric_agent import refine_rubric_descriptions
-                    with st.spinner("Refining rubric…"):
-                        st.session_state.rubric_refined_text = refine_rubric_descriptions(
-                            st.session_state.rubric_manual_text
-                        )
-                    st.session_state.rubric_refined = True
-                    st.session_state.rubric_refine_view = True
-                    st.rerun()
-
-            if st.session_state.rubric_refined and st.session_state.rubric_refine_view:
-                st.markdown("#### Compare Rubric Versions")
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown("**Your original**")
-                    st.code(st.session_state.rubric_manual_text, language="text")
-                with c2:
-                    st.markdown("**AI refined**")
-                    st.code(st.session_state.rubric_refined_text, language="text")
-                btn1, btn2 = st.columns(2)
-                with btn1:
-                    if st.button("Use refined", key="use_refined"):
-                        st.session_state.rubric_manual_text = st.session_state.rubric_refined_text
-                        st.session_state.rubric_refine_view = False
-                        st.rerun()
-                with btn2:
-                    if st.button("Keep original", key="keep_original"):
-                        st.session_state.rubric_refine_view = False
-                        st.rerun()
-
-            # Approve
-            if not st.session_state.rubric_approved:
-                if st.button("Approve rubric", key="approve_manual_rubric"):
-                    st.session_state.rubric = st.session_state.rubric_manual_text
-                    st.session_state.rubric_approved = True
-                    st.rerun()
-
-    else:
-        # Auto-generate
-        if st.button("Generate rubric from brief", key="generate_auto_rubric"):
-            if not st.session_state.brief_text:
-                suffix = Path(brief_file.name).suffix
-                tmp_path = _save_temp(brief_file, suffix)
-                try:
-                    st.session_state.brief_text = read_file(tmp_path)
-                finally:
-                    os.unlink(tmp_path)
-            with st.spinner("Generating rubric…"):
-                st.session_state.rubric = generate_rubric(st.session_state.brief_text)
-            st.session_state.rubric_approved = False
-            st.rerun()
-
-        if st.session_state.rubric and not st.session_state.rubric_approved:
-            if "rubric_edit_textarea" in st.session_state:
-                st.session_state.rubric = st.session_state.rubric_edit_textarea
-            try:
-                rubric_data = json.loads(st.session_state.rubric)
-                st.markdown("### Grading Criteria")
-                for criterion in rubric_data.get("criteria", []):
-                    st.markdown(f"**{criterion['name']}** — {criterion['max_score']} marks")
-                    st.markdown(criterion.get("description", ""))
-                    st.markdown("---")
-            except Exception:
-                st.text_area(
-                    "Review and edit the rubric:",
-                    value=st.session_state.rubric,
-                    height=300,
-                    key="rubric_edit_textarea",
-                )
-                st.session_state.rubric = st.session_state.rubric_edit_textarea
+        if st.session_state.rubric_mode == "manual":
             st.markdown(
-                "<span style='color:#f59e0b; font-size:0.85em;'>"
-                "AI-generated rubric — accuracy depends on assignment type. "
-                "Manual rubric is more reliable for code, math, and diagram assignments."
+                "<span style='color:#64748b; font-size:0.85em;'>"
+                "Manual rubric is recommended for technical, math, and diagram-based assignments"
                 "</span>",
                 unsafe_allow_html=True,
             )
-            if st.button("Approve rubric", key="approve_auto_rubric"):
-                st.session_state.rubric_approved = True
+            st.session_state.rubric_manual_text = st.text_area(
+                "Paste your rubric (any format):",
+                value=st.session_state.rubric_manual_text,
+                height=220,
+                key=f"rubric_manual_textarea_{st.session_state.rubric_key_v}",
+            )
+
+            if st.session_state.rubric_manual_text.strip():
+                # Formatting
+                if not st.session_state.rubric_refined:
+                    if st.button("Format as JSON / Table", help="Converts your raw text into a structured table without changing the wording."):
+                        from skills.rubric_generator.rubric_agent import format_rubric_to_json
+                        with st.spinner("Formatting rubric…"):
+                            st.session_state.rubric_refined_text = format_rubric_to_json(
+                                st.session_state.rubric_manual_text
+                            )
+                        st.session_state.rubric_refined = True
+                        st.session_state.rubric_refine_view = True
+                        st.rerun()
+
+                if st.session_state.rubric_refined and st.session_state.rubric_refine_view:
+                    st.markdown("#### Compare Rubric Versions")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown("**Your original**")
+                        st.code(st.session_state.rubric_manual_text, language="text")
+                    with c2:
+                        st.markdown("**AI formatted**")
+                        try:
+                            from skills.rubric_generator.rubric_agent import _parse_rubric_json
+                            refined_obj = _parse_rubric_json(st.session_state.rubric_refined_text)
+                            rubric_md = "| Criterion | Max Score | Description |\n|---|---|---|\n"
+                            for c in refined_obj.get("criteria", []):
+                                rubric_md += (
+                                    f"| {c.get('name','')} "
+                                    f"| {c.get('max_score','')} "
+                                    f"| {c.get('description','')} |\n"
+                                )
+                            st.markdown(rubric_md)
+                        except Exception:
+                            st.code(st.session_state.rubric_refined_text, language="text")
+                    btn1, btn2 = st.columns(2)
+                    with btn1:
+                        if st.button("Use formatted version", key="use_refined"):
+                            st.session_state.rubric_manual_text = st.session_state.rubric_refined_text
+                            st.session_state.rubric_key_v += 1
+                            st.session_state.rubric_refine_view = False
+                            st.rerun()
+                    with btn2:
+                        if st.button("Keep my original", key="keep_original"):
+                            st.session_state.rubric_refine_view = False
+                            st.rerun()
+
+                # Approve
+                if not st.session_state.rubric_approved:
+                    if st.button("Approve rubric", key="approve_manual_rubric"):
+                        st.session_state.rubric = st.session_state.rubric_manual_text
+                        st.session_state.rubric_approved = True
+                        st.rerun()
+
+        else:
+            # Auto-generate
+            if st.button("Generate rubric from brief", key="generate_auto_rubric"):
+                if not st.session_state.brief_text:
+                    suffix = Path(brief_file.name).suffix
+                    tmp_path = _save_temp(brief_file, suffix)
+                    try:
+                        st.session_state.brief_text = read_file(tmp_path)
+                    finally:
+                        os.unlink(tmp_path)
+                with st.spinner("Generating rubric…"):
+                    st.session_state.rubric = generate_rubric(st.session_state.brief_text)
+                st.session_state.rubric_approved = False
                 st.rerun()
+
+            if st.session_state.rubric and not st.session_state.rubric_approved:
+                if "rubric_edit_textarea" in st.session_state:
+                    st.session_state.rubric = st.session_state.rubric_edit_textarea
+                try:
+                    rubric_data = json.loads(st.session_state.rubric)
+                    st.markdown("### Grading Criteria")
+                    for criterion in rubric_data.get("criteria", []):
+                        st.markdown(f"**{criterion['name']}** — {criterion['max_score']} marks")
+                        st.markdown(criterion.get("description", ""))
+                        st.markdown("---")
+                except Exception:
+                    st.text_area(
+                        "Review and edit the rubric:",
+                        value=st.session_state.rubric,
+                        height=300,
+                        key="rubric_edit_textarea",
+                    )
+                    st.session_state.rubric = st.session_state.rubric_edit_textarea
+                st.markdown(
+                    "<span style='color:#f59e0b; font-size:0.85em;'>"
+                    "AI-generated rubric — accuracy depends on assignment type. "
+                    "Manual rubric is more reliable for code, math, and diagram assignments."
+                    "</span>",
+                    unsafe_allow_html=True,
+                )
+                if st.button("Approve rubric", key="approve_auto_rubric"):
+                    st.session_state.rubric_approved = True
+                    st.rerun()
 
     if st.session_state.rubric_approved:
         _status("Rubric approved and locked.", "success")
@@ -533,7 +548,17 @@ if zip_file and brief_file:
                 else:
                     st.markdown(st.session_state.rubric)
             except Exception:
-                st.markdown(st.session_state.rubric)
+                text = st.session_state.rubric.strip()
+                if "\n" in text and "," in text and text.count(",") >= text.count("\n"):
+                    try:
+                        import io
+                        import pandas as pd
+                        df = pd.read_csv(io.StringIO(text))
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                    except Exception:
+                        st.code(text, language="text")
+                else:
+                    st.code(text, language="text")
     else:
         _status("Upload both files in **Step 1** to unlock rubric controls.", "info")
 else:
@@ -548,95 +573,96 @@ _step(3, "Answer Key", "Provide an answer key to improve grading accuracy.")
 if st.session_state.rubric_approved:
 
 
-    answer_key_mode = st.radio(
-        "How would you like to provide the answer key?",
-        ["Provide manually", "Generate automatically"],
-        index=0,
-        format_func=lambda x: (
-            "Provide manually  (Recommended — especially for technical and diagram-based assignments)"
-            if x == "Provide manually" else x
-        ),
-        key="answer_key_mode_radio",
-    )
-    st.session_state.answer_key_mode = "manual" if answer_key_mode == "Provide manually" else "auto"
-
-    if st.session_state.answer_key_mode == "manual":
-        st.session_state.answer_key_manual_text = st.text_area(
-            "Paste the solution / answer key:",
-            value=st.session_state.answer_key_manual_text,
-            height=180,
-            key="answer_key_manual_textarea",
+    if not st.session_state.answer_key_approved:
+        answer_key_mode = st.radio(
+            "How would you like to provide the answer key?",
+            ["Provide manually", "Generate automatically"],
+            index=0,
+            format_func=lambda x: (
+                "Provide manually  (Recommended — especially for technical and diagram-based assignments)"
+                if x == "Provide manually" else x
+            ),
+            key="answer_key_mode_radio",
         )
-        uploaded_ak = st.file_uploader(
-            "Or upload answer key file (PDF, DOCX, PY, CPP, IPYNB):",
-            type=["pdf", "docx", "py", "cpp", "ipynb"],
-            key="answer_key_file_uploader",
-        )
-        if uploaded_ak:
-            st.session_state.answer_key_file = uploaded_ak
-            st.session_state.answer_key_uploaded_filename = uploaded_ak.name
-            suffix = Path(uploaded_ak.name).suffix
-            tmp_path = _save_temp(uploaded_ak, suffix)
-            try:
-                st.session_state.answer_key_final = read_file(tmp_path)
-            except Exception:
-                st.session_state.answer_key_final = f"[File uploaded: {uploaded_ak.name}]"
-            finally:
-                os.unlink(tmp_path)
-        elif st.session_state.answer_key_manual_text.strip():
-            st.session_state.answer_key_final = st.session_state.answer_key_manual_text
-        else:
-            st.session_state.answer_key_final = None
+        st.session_state.answer_key_mode = "manual" if answer_key_mode == "Provide manually" else "auto"
 
-    else:
-        if st.button("Generate answer key from brief", key="generate_auto_answer_key"):
-            if not st.session_state.brief_text:
-                suffix = Path(brief_file.name).suffix
-                tmp_path = _save_temp(brief_file, suffix)
+        if st.session_state.answer_key_mode == "manual":
+            st.session_state.answer_key_manual_text = st.text_area(
+                "Paste the solution / answer key:",
+                value=st.session_state.answer_key_manual_text,
+                height=180,
+                key="answer_key_manual_textarea",
+            )
+            uploaded_ak = st.file_uploader(
+                "Or upload answer key file (PDF, DOCX, PY, CPP, IPYNB):",
+                type=["pdf", "docx", "py", "cpp", "ipynb"],
+                key="answer_key_file_uploader",
+            )
+            if uploaded_ak:
+                st.session_state.answer_key_file = uploaded_ak
+                st.session_state.answer_key_uploaded_filename = uploaded_ak.name
+                suffix = Path(uploaded_ak.name).suffix
+                tmp_path = _save_temp(uploaded_ak, suffix)
                 try:
-                    st.session_state.brief_text = read_file(tmp_path)
+                    st.session_state.answer_key_final = read_file(tmp_path)
+                except Exception:
+                    st.session_state.answer_key_final = f"[File uploaded: {uploaded_ak.name}]"
                 finally:
                     os.unlink(tmp_path)
-            if not st.session_state.brief_text.strip():
-                st.error(
-                    "Error: Could not extract any readable text from the assignment brief. "
-                    "If this is a scanned/image-only document, you must temporarily set **EXTRACT_IMAGES=True** "
-                    "in your `.env` file for the AI to read it."
-                )
+            elif st.session_state.answer_key_manual_text.strip():
+                st.session_state.answer_key_final = st.session_state.answer_key_manual_text
             else:
-                from utils.llm_client import call_llm
-                with st.spinner("Generating answer key… (this uses the LLM fallback engine)"):
-                    try:
-                        sys_prompt = "You are an expert academic assistant. Given the assignment brief, generate a thorough model answer or solution key."
-                        result = call_llm(
-                            system_prompt=sys_prompt,
-                            user_prompt=st.session_state.brief_text,
-                            max_tokens=2048
-                        )
-                        st.session_state.answer_key_auto_text = result
-                        st.session_state.answer_key_final = result
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Generation failed: {e}")
+                st.session_state.answer_key_final = None
 
-        if st.session_state.answer_key_auto_text:
-            st.text_area(
-                "Generated answer key:",
-                value=st.session_state.answer_key_auto_text,
-                height=180,
-                key="answer_key_auto_display",
-            )
-            # Keep the grading input in sync with user edits.
-            if not st.session_state.answer_key_approved:
-                st.session_state.answer_key_auto_text = st.session_state.answer_key_auto_display
-                st.session_state.answer_key_final = st.session_state.answer_key_auto_display
-            st.markdown(
-                "<span style='color:#f59e0b; font-size:0.85em;'>"
-                "AI-generated answer key may be incorrect for code, math, or diagram assignments. "
-                "Always verify before grading."
-                "</span>",
-                unsafe_allow_html=True,
-            )
+        else:
+            if st.button("Generate answer key from brief", key="generate_auto_answer_key"):
+                if not st.session_state.brief_text:
+                    suffix = Path(brief_file.name).suffix
+                    tmp_path = _save_temp(brief_file, suffix)
+                    try:
+                        st.session_state.brief_text = read_file(tmp_path)
+                    finally:
+                        os.unlink(tmp_path)
+                if not st.session_state.brief_text.strip():
+                    st.error(
+                        "Error: Could not extract any readable text from the assignment brief. "
+                        "If this is a scanned/image-only document, you must temporarily set **EXTRACT_IMAGES=True** "
+                        "in your `.env` file for the AI to read it."
+                    )
+                else:
+                    from utils.llm_client import call_llm
+                    with st.spinner("Generating answer key… (this uses the LLM fallback engine)"):
+                        try:
+                            sys_prompt = "You are an expert academic assistant. Given the assignment brief, generate a thorough model answer or solution key."
+                            result = call_llm(
+                                system_prompt=sys_prompt,
+                                user_prompt=st.session_state.brief_text,
+                                max_tokens=2048
+                            )
+                            st.session_state.answer_key_auto_text = result
+                            st.session_state.answer_key_final = result
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Generation failed: {e}")
+
+            if st.session_state.answer_key_auto_text:
+                st.text_area(
+                    "Generated answer key:",
+                    value=st.session_state.answer_key_auto_text,
+                    height=180,
+                    key="answer_key_auto_display",
+                )
+                # Keep the grading input in sync with user edits.
+                if not st.session_state.answer_key_approved:
+                    st.session_state.answer_key_auto_text = st.session_state.answer_key_auto_display
+                    st.session_state.answer_key_final = st.session_state.answer_key_auto_display
+                st.markdown(
+                    "<span style='color:#f59e0b; font-size:0.85em;'>"
+                    "AI-generated answer key may be incorrect for code, math, or diagram assignments. "
+                    "Always verify before grading."
+                    "</span>",
+                    unsafe_allow_html=True,
+                )
 
     if st.session_state.answer_key_final:
         if not st.session_state.answer_key_approved:
@@ -692,20 +718,20 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
             log_area = st.empty()
             
             lock = threading.Lock()
-            done = {"n": 0}
+            progress_stats = {"n": 0}
             total = len(submissions)
-            logs = []
+            logs: list[str] = []
 
             def _on_complete(filename: str, _result: dict):
                 with lock:
-                    done["n"] += 1
+                    progress_stats["n"] += 1
                     progress.progress(
-                        done["n"] / total,
-                        text=f"Graded {done['n']}/{total} — {filename}",
+                        progress_stats["n"] / total,
+                        text=f"Graded {progress_stats['n']}/{total} — {filename}",
                     )
                     score = _result.get("marks", "Error")
                     logs.append(f"✓ {filename} — Score: {score}")
-                    log_area.code("\n".join(logs[-10:]), language="text")
+                    log_area.code("\n".join(logs[-10:]), language="text")  # type: ignore
 
             results = grade_all(
                 st.session_state.rubric,

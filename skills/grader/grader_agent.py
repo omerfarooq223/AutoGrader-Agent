@@ -17,8 +17,6 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from groq import Groq
-
 from config import (
     MODEL,
     MAX_CONCURRENT_GRADES,
@@ -54,17 +52,11 @@ def _trim_text(text: str, max_chars: int, label: str) -> str:
     )
 
 
-def _get_client() -> Groq:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise EnvironmentError("GROQ_API_KEY environment variable is not set.")
-    return Groq(api_key=api_key)
 
 
-def _call_llm(client: Groq, system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> str:
+def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> str:
     """Make a single Groq chat completion call."""
-    raw = call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
-    return raw
+    return call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
 
 
 def _clean_name(raw_name: str, filename: str) -> str:
@@ -183,8 +175,6 @@ def grade_submission(
     Grade a single student submission with retry logic.
     If answer_key is provided, the LLM compares the submission to it.
     """
-    client = _get_client()
-
     if answer_key:
         rubric_text = _trim_text(rubric, MAX_RUBRIC_CHARS, "Rubric")
         answer_key_text = _trim_text(answer_key, MAX_ANSWER_KEY_CHARS, "Answer key")
@@ -209,7 +199,6 @@ def grade_submission(
 
     raw = retry_api_call(
         _call_llm,
-        client,
         SYSTEM_PROMPT,
         prompt,
         cancel_event=cancel_event,
@@ -268,8 +257,16 @@ def grade_all(
             raise InterruptedError("Cancelled")
         
         # Artificially throttle API calls to prevent rate limits.
-        # Since MAX_CONCURRENT_GRADES=1 and grading itself takes time, 1.5s is safe.
-        time.sleep(1.5)
+        # Since MAX_CONCURRENT_GRADES=1, a 20.0s sleep gives ~3 requests per minute.
+        # For long assignments (5+ pages), we increase the delay to 40s to ensure 
+        # the Token-Per-Minute quota replenishes fully.
+        # llama-3.1-8b-instant has ~5x higher TPM than 70B — shorter sleep is safe
+        base_sleep = 8.0
+        if len(sub["content"]) > 8000:
+            base_sleep = 15.0
+            logger.info("Large submission detected (>8k chars). Sleeping 15s for quota recovery.")
+        
+        time.sleep(base_sleep)
         
         result = grade_submission(
             rubric,
@@ -281,7 +278,6 @@ def grade_all(
         result["filename"] = sub["filename"]
         return result
 
-    pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GRADES)
     future_map = {pool.submit(_grade_one, sub): sub for sub in to_grade}
     
     try:

@@ -89,25 +89,42 @@ def call_llm(
     
     # Try Groq first — it's proven reliable and fast in this region
     try:
+        if not os.environ.get("GROQ_API_KEY"):
+            logger.warning("GROQ_API_KEY missing from environment — skipping Groq.")
+            raise EnvironmentError("GROQ_API_KEY not set.")
+            
+        logger.warning("DEBUG: Trying Groq with model '%s'…", groq_model)
         result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
-        logger.info("Groq call succeeded with model: %s", groq_model)
+        logger.info("Groq succeeded with model: %s", groq_model)
         return result
     except Exception as groq_err:
-        logger.warning("Groq failed, trying Gemini fallbacks: %s", groq_err)
+        err_msg = str(groq_err)
+        logger.warning("DEBUG: Groq Failed: %s", err_msg[:200])
+        if "429" in err_msg or "rate_limit" in err_msg.lower():
+           import re, time
+           match = re.search(r'retry in ([\d\.]+)s', err_msg)
+           wait = float(match.group(1)) + 1.0 if match else 60.0
+           logger.warning("Groq rate limit hit. Waiting %.1fs and retrying Groq...", wait)
+           time.sleep(wait)
+           return _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
+        else:
+            logger.warning("Groq failed, trying Gemini fallbacks: %s", groq_err)
         last_error = groq_err
 
     # Gemini fallbacks
     for gem_model in gemini_models:
         try:
+            logger.warning("DEBUG: Trying Gemini fallback with model '%s'…", gem_model)
             result = _call_gemini(system_prompt, user_prompt, max_tokens, model_name=gem_model)
             logger.info("Gemini fallback succeeded with model: %s", gem_model)
             return result
         except Exception as gemini_err:
+            logger.warning("DEBUG: Gemini fallback '%s' Failed: %s", gem_model, str(gemini_err)[:200])
             logger.debug("Gemini fallback %s failed: %s", gem_model, gemini_err)
             continue
 
     raise RuntimeError(
-        f"All models failed.\n"
-        f"Groq error: {last_error}\n"
+        f"All LLM providers failed.\n"
+        f"Groq Error: {last_error}\n"
         "Gemini models also exceeded quota or were unavailable."
     )

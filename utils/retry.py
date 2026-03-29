@@ -28,13 +28,29 @@ def retry_api_call(func, *args, max_retries: int = MAX_RETRIES, cancel_event=Non
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
+                # Default exponential backoff
+                wait = float(2 ** (attempt + 1))
+                
+                # Check for 429 / Rate Limit / Quota and try to parse the requested wait time
+                exc_str = str(exc)
+                if "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str.upper() or "RATE_LIMIT" in exc_str.upper():
+                    import re
+                    # Look for "Please retry in X.Xs" or similar (Gemini style)
+                    matches = re.search(r'retry in ([\d\.]+)s', exc_str)
+                    if matches:
+                        wait = float(matches.group(1)) + 1.0  # Add 1s buffer
+                        logger.info("Rate limit hit. API requested a wait of %.1fs", wait)
+                    else:
+                        # Harder backoff for 429 if no specific time is found
+                        wait = float(max(wait, 30.0))
+                
                 logger.warning(
-                    "API call failed (attempt %d/%d): %s — retrying in %ds",
+                    "API call failed (attempt %d/%d): %s — retrying in %.1fs",
                     attempt + 1, max_retries, exc, wait,
                 )
                 # Interruptible sleep
-                for _ in range(int(wait * 10)):
+                start_sleep = time.time()
+                while time.time() - start_sleep < wait:
                     if cancel_event and cancel_event.is_set():
                         logger.info("API call cancelled during backoff sleep.")
                         raise InterruptedError("Cancelled by user")
