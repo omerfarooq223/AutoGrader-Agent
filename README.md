@@ -120,14 +120,14 @@ All settings are in `.env` (see `.env.example`):
 |----------|---------|-------------|
 | `GROQ_API_KEY` | — | Your Groq API key (**Primary — recommended**) |
 | `GEMINI_API_KEY` | — | Your Gemini API key (Secondary fallback) |
-| `MODEL` | `llama-3.3-70b-versatile` | Primary Groq model |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Fallback Gemini model |
+| `MODEL` | `llama-3.1-8b-instant` | Primary Groq model (higher free-tier quota) |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Fallback Gemini model (unavailable in some regions) |
 | `EXTRACT_IMAGES` | `False` | Turn on to extract and describe images |
 | `MAX_CONCURRENT_GRADES` | `1` | Parallel grading workers |
 
 ## Tech Stack
 
-- **LLM Engine**: Dual-Redundant Routing (**Groq Llama 3.3 70B** as primary, **Gemini 2.0 Flash** as fallback)
+- **LLM Engine**: Dual-Redundant Routing (**Groq Llama 3.1 8B Instant** as primary (Gemini fallback disabled in Pakistan))
 - **Vision**: Gemini API (for diagram understanding in PDFs/DOCX)
 - **Plagiarism**: Scikit-Learn (TF-IDF) + Character N-Gram Jaccard
 - **Reports**: Styled Excel output with `openpyxl`

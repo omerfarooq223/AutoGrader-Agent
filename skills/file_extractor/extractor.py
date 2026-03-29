@@ -52,7 +52,9 @@ def _describe_image(image_bytes: bytes) -> str | None:
                 ]
             )
 
-        response = retry_api_call(_call)
+        # Image description is optional — fail fast, never retry
+        # Gemini quota death causes 4-minute freezes if retry_api_call is used
+        response = _call()
         return response.text.strip()
     except Exception as e:
         logger.debug(f"Vision API call failed for an image: {e}", exc_info=True)

@@ -236,7 +236,8 @@ def format_rubric_to_json(rubric_text: str) -> str:
         "   - Use the HIGHEST score found for that criterion as the 'max_score'.\n"
         "   - MERGE all the level descriptions into the single 'description' field.\n"
         "   - Use labels to keep it organized, e.g., '[5 Marks]: ... [3 Marks]: ... [1 Mark]: ...'\n"
-        "4. If a criterion is missing a mark allocation entirely, default it to 1.\n\n"
+        "4. If a criterion is missing a mark allocation entirely, default it to 1.\n"
+        "5. IMPORTANT: Never include header rows as criteria. If the first row contains words like 'Criterion', 'Category', 'Name', or 'Criteria' as the criterion name, skip it entirely — it is a table header, not a real criterion.\n\n"
         "Respond ONLY with valid JSON — no markdown, no extra text:\n"
         '{"criteria": [{"name": "...", "max_score": <number>, '
         '"description": "..."}, ...]}'

@@ -111,6 +111,16 @@ def call_llm(
             logger.warning("Groq failed, trying Gemini fallbacks: %s", groq_err)
         last_error = groq_err
 
+    # Gemini fallbacks — skip entirely if daily quota is known dead
+    # "limit: 0" in error means daily cap hit, not per-minute — no point retrying
+    if "limit: 0" in str(last_error):
+        logger.warning("Gemini daily quota exhausted — skipping all Gemini fallbacks.")
+        raise RuntimeError(
+            f"Groq failed and Gemini daily quota is exhausted.\n"
+            f"Groq Error: {last_error}\n"
+            "Wait until tomorrow for Gemini quota reset, or upgrade Gemini plan."
+        )
+
     # Gemini fallbacks
     for gem_model in gemini_models:
         try:

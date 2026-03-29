@@ -35,19 +35,27 @@ _THIN_BORDER = Border(
 
 def _shorten_flag(flag: str) -> str:
     """
-    Convert a verbose plagiarism flag string like:
-      'Similar to A.docx (95.7%, cos=96% ngram=96%) | Similar to B.docx (...)'
-    into a compact summary like:
-      '⚠️ 2 match(es) found (max 96%)'
+    Convert a verbose plagiarism flag string into a readable summary that
+    preserves the names of matched students so teachers know who copied from whom.
+
+    Input:  'Similar to ali.pdf (95.7%, cos=96% ngram=96%) | Similar to sara.docx (...)'
+    Output: '⚠️ Similar to: ali.pdf (96%), sara.docx (96%)'
     """
     if not flag:
         return ""
     matches = [m.strip() for m in flag.split("|") if m.strip()]
     if not matches:
         return ""
-    percents = re.findall(r"(\d+(?:\.\d+)?)%", flag)
-    max_pct = max(float(p) for p in percents) if percents else 0
-    return f"⚠️ {len(matches)} match(es) found (max {max_pct:.0f}%)"
+    parts = []
+    for m in matches:
+        # Extract filename and percentage from "Similar to X.pdf (95.7%, ...)"
+        name_match = re.search(r"Similar to (.+?) \(", m)
+        pct_match  = re.search(r"\((\d+(?:\.\d+)?)%", m)
+        if name_match and pct_match:
+            parts.append(f"{name_match.group(1)} ({float(pct_match.group(1)):.0f}%)")
+        else:
+            parts.append(m)
+    return "⚠️ Similar to: " + ", ".join(parts)
 
 
 def shorten_plagiarism_flag(flag: str) -> str:
@@ -164,7 +172,8 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict]) -> None:
     categories = _collect_all_categories(results)
 
     # Build headers — no brackets on category names, no Feedback column
-    headers = ["Name", "ID", "Marks"]
+    rubric_total = TOTAL_MARKS if TOTAL_MARKS and TOTAL_MARKS > 0 else "?"
+    headers = ["Name", "ID", f"Marks (/ {rubric_total})"]
     headers += [_clean_category_name(c) for c in categories]
     headers += ["Deductions / Reason", "Plagiarism Flag"]   # Feedback removed
 
@@ -242,39 +251,41 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict]) -> tuple:
             stats_data.append(("", r.get("filename", r.get("name", "unknown"))))
 
     if marks:
-        passed = sum(1 for m in marks if m >= PASS_THRESHOLD)
+        # Pass threshold as 50% of actual rubric total — not the raw config value
+        rubric_total  = TOTAL_MARKS if TOTAL_MARKS and TOTAL_MARKS > 0 else max(marks)
+        pass_mark     = round(rubric_total * 0.5)
+        passed        = sum(1 for m in marks if m >= pass_mark)
         stats_data += [
             ("", ""),
+            ("Total Marks (per assignment)", rubric_total),
+            ("Pass Mark",                   f"≥ {pass_mark} (50%)"),
             ("Average",       round(statistics.mean(marks), 2)),
             ("Median",        round(statistics.median(marks), 2)),
             ("Std Deviation", round(statistics.stdev(marks), 2) if len(marks) > 1 else "N/A"),
             ("Minimum",       min(marks)),
             ("Maximum",       max(marks)),
             ("", ""),
-            (f"Passed (≥ {PASS_THRESHOLD})",  passed),
-            (f"Failed (< {PASS_THRESHOLD})",  len(marks) - passed),
+            (f"Passed (≥ {pass_mark})",  passed),
+            (f"Failed (< {pass_mark})",  len(marks) - passed),
             ("Pass Rate",     f"{passed / len(marks) * 100:.1f}%"),
         ]
 
+        # rubric_total already calculated above — use it here too
         buckets = {
-            "A (≥90%)":  0,
-            "B (80-89%)": 0,
-            "C (70-79%)": 0,
-            "D (60-69%)": 0,
-            "F (<60%)":   0,
+            f"A (≥90% of {rubric_total})":   0,
+            f"B (80-89% of {rubric_total})":  0,
+            f"C (70-79% of {rubric_total})":  0,
+            f"D (60-69% of {rubric_total})":  0,
+            f"F (<60% of {rubric_total})":    0,
         }
+        bk = list(buckets.keys())
         for m in marks:
-            pct = (m / TOTAL_MARKS) * 100 if TOTAL_MARKS and TOTAL_MARKS > 0 else 0
-            if pct >= 90:
-                buckets["A (≥90%)"]   += 1
-            elif pct >= 80:
-                buckets["B (80-89%)"] += 1
-            elif pct >= 70:
-                buckets["C (70-79%)"] += 1
-            elif pct >= 60:
-                buckets["D (60-69%)"] += 1
-            else:
-                buckets["F (<60%)"]   += 1
+            pct = (m / rubric_total) * 100
+            if   pct >= 90: buckets[bk[0]] += 1
+            elif pct >= 80: buckets[bk[1]] += 1
+            elif pct >= 70: buckets[bk[2]] += 1
+            elif pct >= 60: buckets[bk[3]] += 1
+            else:           buckets[bk[4]] += 1
 
         stats_data.append(("", ""))
         stats_data.append(("Grade Distribution", "Count"))

@@ -84,10 +84,10 @@ def _clean_name(raw_name: str, filename: str) -> str:
     return name
 
 
-def _parse_json(raw: str, fallback_name: str) -> dict:
+def _parse_json(raw: str, fallback_name: str, rubric: str = None) -> dict:
     """
     Extract JSON from an LLM response, handle code fences, validate scores,
-    and clean the student name field.
+    enforce per-criterion max_score caps, and clean the student name field.
     """
     text = raw
     if text.startswith("```"):
@@ -110,6 +110,13 @@ def _parse_json(raw: str, fallback_name: str) -> dict:
         result.get("name", ""), fallback_name
     )
 
+    # Normalize deductions — LLM sometimes returns a list instead of a string
+    deductions = result.get("deductions", "")
+    if isinstance(deductions, list):
+        result["deductions"] = " ".join(str(d) for d in deductions)
+    elif deductions is None:
+        result["deductions"] = ""
+
     # Clean ID — if it looks like a filename or is empty, mark as NOT FOUND
     raw_id = str(result.get("id", "")).strip()
     if not raw_id or raw_id.lower() in ("n/a", "not found", "none", ""):
@@ -117,9 +124,34 @@ def _parse_json(raw: str, fallback_name: str) -> dict:
     else:
         result["id"] = raw_id
 
-    # Validate: category_scores sum must match marks
+    # Validate: cap individual scores to their max_score, then fix total
     cat_scores = result.get("category_scores", {})
     if cat_scores and isinstance(cat_scores, dict):
+        # Build max_score lookup from rubric to enforce per-criterion caps
+        max_scores: dict[str, float] = {}
+        if rubric:
+            try:
+                import json as _json
+                rubric_obj = _json.loads(rubric) if isinstance(rubric, str) else rubric
+                for criterion in rubric_obj.get("criteria", []):
+                    max_scores[criterion["name"]] = float(criterion.get("max_score", 100))
+            except Exception:
+                pass
+
+        corrections = []
+        for k, v in cat_scores.items():
+            if not isinstance(v, (int, float)):
+                continue
+            cap = max_scores.get(k, 100)
+            if v > cap:
+                cat_scores[k] = cap
+                corrections.append(f"{k} capped at {cap}")
+
+        if corrections:
+            deductions = result.get("deductions", "") or ""
+            note = "[Score capped to rubric max: " + ", ".join(corrections) + "]"
+            result["deductions"] = f"{deductions} {note}".strip()
+
         numeric_scores = [v for v in cat_scores.values() if isinstance(v, (int, float))]
         if numeric_scores:
             correct_sum = sum(numeric_scores)
@@ -204,7 +236,7 @@ def grade_submission(
         cancel_event=cancel_event,
         max_tokens=GRADING_MAX_OUTPUT_TOKENS,
     )
-    return _parse_json(raw, filename)
+    return _parse_json(raw, filename, rubric=rubric)
 
 
 def grade_all(

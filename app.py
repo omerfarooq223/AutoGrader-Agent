@@ -706,7 +706,15 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                 exclude = []
                 if st.session_state.get("answer_key_uploaded_filename"):
                     exclude.append(st.session_state.answer_key_uploaded_filename)
-                submissions = extract_and_collect(tmp_zip, exclude_filenames=exclude)
+                submissions, extract_dir = extract_and_collect(tmp_zip, exclude_filenames=exclude)
+                # Remove any submission whose extracted name matches the answer key author
+                # This catches cases where the answer key file was accidentally left in the ZIP
+                if st.session_state.get("answer_key_uploaded_filename"):
+                    ak_stem = Path(st.session_state.answer_key_uploaded_filename).stem.lower()
+                    before = len(submissions)
+                    submissions = [s for s in submissions if ak_stem not in s["filename"].lower()]
+                    if len(submissions) < before:
+                        st.warning(f"Excluded {before - len(submissions)} file(s) matching answer key name from grading.")
 
             if not submissions:
                 _status("No supported files found in the ZIP archive.", "error")
@@ -747,8 +755,16 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xl:
                 report_path = tmp_xl.name
-            _, insights = write_results(results, report_path, return_insights=True)
-            st.session_state.class_insights = insights
+            # Save report immediately — don't block on LLM insights call
+            write_results(results, report_path, return_insights=False)
+            # Generate insights in background so UI stays responsive
+            def _gen_insights():
+                try:
+                    from skills.report_writer.excel_writer import generate_class_insights
+                    st.session_state.class_insights = generate_class_insights(results)
+                except Exception:
+                    st.session_state.class_insights = []
+            threading.Thread(target=_gen_insights, daemon=True).start()
 
             st.session_state.results = results
             st.session_state.report_bytes = Path(report_path).read_bytes()
@@ -757,6 +773,9 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
         finally:
             st.session_state.grading_in_progress = False
             os.unlink(tmp_zip)
+            import shutil
+            if "extract_dir" in dir() and extract_dir and Path(extract_dir).exists():
+                shutil.rmtree(extract_dir, ignore_errors=True)
 
 
 elif st.session_state.results is not None:
