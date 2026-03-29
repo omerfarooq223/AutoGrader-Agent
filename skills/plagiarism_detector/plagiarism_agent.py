@@ -1,11 +1,12 @@
 """
 Plagiarism Agent — detects similarity between submissions using
-TF-IDF cosine similarity + character n-gram overlap, and flags pairs ≥ threshold.
+TF-IDF cosine similarity + character n-gram overlap, and flags pairs >= threshold.
 
-Features:
-  - Dual detection: TF-IDF cosine similarity + character-level n-gram Jaccard overlap
-  - Combined score for more robust detection
-  - Configurable threshold from config
+Production hardening:
+  - Skips error/skipped submissions to prevent false flags
+  - Minimum content length guard for reliable scoring
+  - Consistent cache_key matching with grading results
+  - apply_flags no longer mutates input
 """
 
 import logging
@@ -16,6 +17,23 @@ from sklearn.metrics.pairwise import cosine_similarity
 from config import SIMILARITY_THRESHOLD
 
 logger = logging.getLogger(__name__)
+
+# Submissions shorter than this are too small for reliable similarity scoring
+_MIN_CONTENT_CHARS = 200
+
+# Content prefixes that indicate a failed/skipped read — not real submissions
+_ERROR_PREFIXES = ("[ERROR:", "[SKIPPED:")
+
+
+def _is_gradeable(content: str) -> bool:
+    """Return True if content is a real submission, not an error placeholder."""
+    if not content:
+        return False
+    if any(content.startswith(prefix) for prefix in _ERROR_PREFIXES):
+        return False
+    if len(content) < _MIN_CONTENT_CHARS:
+        return False
+    return True
 
 
 def _ngram_jaccard(text_a: str, text_b: str, n: int = 4) -> float:
@@ -37,60 +55,82 @@ def check_plagiarism(submissions: list[dict]) -> dict[str, list[str]]:
     Parameters
     ----------
     submissions : list[dict]
-        Each dict must have keys: filename, content.
+        Each dict must have keys: filename, content, and optionally cache_key.
 
     Returns
     -------
     dict[str, list[str]]
-        Mapping of filename → list of descriptive flag strings.
+        Mapping of cache_key -> list of descriptive flag strings.
         Only files involved in a flagged pair appear as keys.
     """
-    if len(submissions) < 2:
+    # Filter to gradeable submissions only — error placeholders skew results
+    gradeable = [
+        s for s in submissions
+        if _is_gradeable(s.get("content", ""))
+    ]
+
+    skipped = len(submissions) - len(gradeable)
+    if skipped:
+        logger.warning(
+            "Plagiarism check: skipping %d submission(s) with error/short content.",
+            skipped
+        )
+
+    if len(gradeable) < 2:
+        logger.info("Fewer than 2 gradeable submissions — plagiarism check skipped.")
         return {}
 
-    filenames = [s["filename"] for s in submissions]
-    contents = [s["content"] for s in submissions]
+    # Use cache_key as the stable identifier — handles duplicate filenames
+    keys     = [s.get("cache_key", s["filename"]) for s in gradeable]
+    names    = [s["filename"] for s in gradeable]
+    contents = [s["content"] for s in gradeable]
 
     # TF-IDF cosine similarity matrix
-    vectorizer = TfidfVectorizer(stop_words="english")
+    vectorizer   = TfidfVectorizer(stop_words="english")
     tfidf_matrix = vectorizer.fit_transform(contents)
     cosine_matrix = cosine_similarity(tfidf_matrix)
 
     flags: dict[str, list[str]] = {}
 
-    for i in range(len(filenames)):
-        for j in range(i + 1, len(filenames)):
-            cos_score = cosine_matrix[i][j]
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            cos_score  = cosine_matrix[i][j]
             ngram_score = _ngram_jaccard(contents[i], contents[j])
-            combined = 0.6 * cos_score + 0.4 * ngram_score
+            combined   = 0.6 * cos_score + 0.4 * ngram_score
 
             if combined >= SIMILARITY_THRESHOLD:
-                pct = f"{combined * 100:.1f}%"
+                pct    = f"{combined * 100:.1f}%"
                 detail = f"cos={cos_score:.0%} ngram={ngram_score:.0%}"
-                msg_i = f"Similar to {filenames[j]} ({pct}, {detail})"
-                msg_j = f"Similar to {filenames[i]} ({pct}, {detail})"
-                flags.setdefault(filenames[i], []).append(msg_i)
-                flags.setdefault(filenames[j], []).append(msg_j)
+                flags.setdefault(keys[i], []).append(
+                    f"Similar to {names[j]} ({pct}, {detail})"
+                )
+                flags.setdefault(keys[j], []).append(
+                    f"Similar to {names[i]} ({pct}, {detail})"
+                )
                 logger.warning(
-                    "Plagiarism flag: %s ↔ %s — %s (%s)",
-                    filenames[i], filenames[j], pct, detail,
+                    "Plagiarism flag: %s <-> %s — %s (%s)",
+                    names[i], names[j], pct, detail,
                 )
 
     logger.info(
         "Plagiarism check complete: %d pair(s) flagged out of %d comparisons.",
         sum(len(v) for v in flags.values()) // 2,
-        len(filenames) * (len(filenames) - 1) // 2,
+        len(keys) * (len(keys) - 1) // 2,
     )
     return flags
 
 
 def apply_flags(results: list[dict], flags: dict[str, list[str]]) -> list[dict]:
     """
-    Merge plagiarism flags into grading results in-place and return them.
-    Adds a 'plagiarism_flag' key to each result dict.
+    Return a new list of result dicts with plagiarism_flag added.
+    Matches on cache_key for consistency with grading results.
+    Does NOT mutate the input list.
     """
+    updated = []
     for entry in results:
-        fname = entry.get("filename", "")
-        matched = flags.get(fname, [])
-        entry["plagiarism_flag"] = " | ".join(matched) if matched else ""
-    return results
+        new_entry = dict(entry)
+        key     = entry.get("cache_key", entry.get("filename", ""))
+        matched = flags.get(key, [])
+        new_entry["plagiarism_flag"] = " | ".join(matched) if matched else ""
+        updated.append(new_entry)
+    return updated

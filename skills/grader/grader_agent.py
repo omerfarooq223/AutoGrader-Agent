@@ -234,9 +234,9 @@ def grade_all(
     to_grade: list[dict] = []
 
     for sub in submissions:
-        if sub["filename"] in cached:
+        if sub.get("cache_key", sub["filename"]) in cached:
             logger.info("Using cached result for %s", sub["filename"])
-            entry = dict(cached[sub["filename"]])
+            entry = dict(cached[sub.get("cache_key", sub["filename"])])
             entry["filename"] = sub["filename"]
             results.append(entry)
         else:
@@ -276,6 +276,7 @@ def grade_all(
             cancel_event=cancel_event,
         )
         result["filename"] = sub["filename"]
+        result["cache_key"] = sub.get("cache_key", sub["filename"])
         return result
 
     future_map = {pool.submit(_grade_one, sub): sub for sub in to_grade}

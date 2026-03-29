@@ -15,15 +15,14 @@ import os
 import re
 from pathlib import Path
 
-from groq import Groq
-
+import config
 from config import MODEL
 from utils.retry import retry_api_call
 from utils.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
-RUBRIC_CACHE = ".rubric_cache.json"
+RUBRIC_CACHE = os.environ.get("RUBRIC_CACHE_FILENAME", ".rubric_cache.json")
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent / "rubrics"
 
 
@@ -96,14 +95,13 @@ def _match_template(brief_text: str) -> dict | None:
         hits = sum(1 for kw in keywords if kw.lower() in brief_lower)
         if hits > best_count:
             best, best_count = tmpl, hits
-    return best if best_count >= 2 else None
+    # Threshold: must match at least 2 keywords AND 40% of the template's keywords
+    if best and best_count >= 2:
+        total_keywords = len(best.get('match_keywords', []))
+        if total_keywords == 0 or best_count / total_keywords >= 0.4:
+            return best
+    return None
 
-
-def _get_client() -> Groq:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise EnvironmentError("GROQ_API_KEY environment variable is not set.")
-    return Groq(api_key=api_key)
 
 
 def _parse_rubric_json(raw: str) -> dict:
@@ -163,7 +161,6 @@ def generate_rubric(brief_text: str) -> str:
     """
     import config
 
-    client   = _get_client()
     template = _match_template(brief_text)
 
     if template:
@@ -228,8 +225,6 @@ def format_rubric_to_json(rubric_text: str) -> str:
     extract it into a standardized JSON rubric.
     Never rewrite or change the names, allocations, or descriptions.
     """
-    client = _get_client()
-
     system_prompt = (
         "You are an expert academic grading assistant. "
         "You will receive a grading rubric in any format (JSON, CSV table, "
@@ -256,12 +251,17 @@ def format_rubric_to_json(rubric_text: str) -> str:
 
 
 def save_rubric(rubric: str, base_dir: str = ".") -> None:
-    """Persist the approved rubric to disk for reuse."""
+    """Persist the approved rubric to disk for reuse (atomic write)."""
+    import tempfile
     path = Path(base_dir) / RUBRIC_CACHE
-    path.write_text(
-        json.dumps({"rubric": rubric}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    payload = json.dumps({"rubric": rubric}, ensure_ascii=False, indent=2)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        delete=False, suffix=".tmp"
+    ) as tmp:
+        tmp.write(payload)
+        tmp_path = tmp.name
+    os.replace(tmp_path, path)
     logger.info("Rubric saved to %s", path)
 
 

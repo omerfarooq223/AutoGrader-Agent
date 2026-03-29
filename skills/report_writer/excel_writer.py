@@ -84,7 +84,12 @@ def _generate_class_insights(results: list[dict]) -> list[str]:
     if not deductions:
         return []
 
-    combined = "\n---\n".join(deductions)
+    # Cap total input to avoid quota exhaustion on large classes
+    # Each deduction trimmed to 300 chars — enough signal for pattern detection
+    trimmed = [d[:300] for d in deductions]
+    combined = "\n---\n".join(trimmed)
+    if len(combined) > 8000:
+        combined = combined[:8000] + "\n[truncated]"
 
     system_prompt = (
         "You are an academic analytics assistant. You will receive mark deduction "
@@ -189,7 +194,12 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict]) -> None:
         # Category scores — look up by original key (may have brackets)
         cat_scores = entry.get("category_scores", {})
         for cat in categories:
-            ws.cell(row=row_idx, column=col, value=cat_scores.get(cat, ""))
+            # Try exact key first, then stripped version for bracket mismatches
+            value = cat_scores.get(cat)
+            if value is None:
+                stripped = cat.strip("[]")
+                value = cat_scores.get(stripped, "")
+            ws.cell(row=row_idx, column=col, value=value)
             col += 1
 
         # Deductions
@@ -254,7 +264,7 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict]) -> tuple:
             "F (<60%)":   0,
         }
         for m in marks:
-            pct = (m / TOTAL_MARKS) * 100 if TOTAL_MARKS else 0
+            pct = (m / TOTAL_MARKS) * 100 if TOTAL_MARKS and TOTAL_MARKS > 0 else 0
             if pct >= 90:
                 buckets["A (≥90%)"]   += 1
             elif pct >= 80:
@@ -332,7 +342,22 @@ def write_results(
         _write_insights_section(ws_stats, last_row, insights)
         _auto_width(ws_stats)
 
-    wb.save(output_path)
+    # Atomic write — save to temp file first, then rename
+    # Prevents corrupted output if process is killed mid-write
+    import os
+    import tempfile
+    from pathlib import Path
+    out = Path(output_path)
+    with tempfile.NamedTemporaryFile(
+        suffix=".xlsx", dir=out.parent, delete=False
+    ) as tmp:
+        tmp_path = tmp.name
+    try:
+        wb.save(tmp_path)
+        os.replace(tmp_path, output_path)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
     if return_insights:
         return output_path, insights
     return output_path

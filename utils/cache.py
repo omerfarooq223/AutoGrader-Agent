@@ -1,10 +1,18 @@
 """
 Cache utility — saves intermediate grading results to disk so runs
 can be resumed after a crash without re-grading already-finished files.
+
+Production hardening:
+  - Atomic writes (write temp → rename) to prevent corrupt cache on crash
+  - Duplicate filename detection with content-hash disambiguation
+  - Explicit error logging on save failure instead of silent data loss
 """
 
+import hashlib
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 from config import CACHE_FILENAME
@@ -16,8 +24,22 @@ def _cache_path(base_dir: str) -> Path:
     return Path(base_dir) / CACHE_FILENAME
 
 
+def _make_safe_key(filename: str, content: str = None) -> str:
+    """
+    Build a cache key that survives duplicate filenames.
+    If content is provided, appends a short hash so two students
+    with identical filenames get separate cache entries.
+    """
+    if not content:
+        return filename
+    short_hash = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:8]
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    return f"{stem}_{short_hash}{suffix}"
+
+
 def load_cache(base_dir: str) -> dict[str, dict]:
-    """Load cached results. Returns {filename: result_dict}."""
+    """Load cached results. Returns {cache_key: result_dict}."""
     path = _cache_path(base_dir)
     if not path.exists():
         return {}
@@ -31,9 +53,30 @@ def load_cache(base_dir: str) -> dict[str, dict]:
 
 
 def save_cache(base_dir: str, results: dict[str, dict]) -> None:
-    """Persist results dict to cache file."""
+    """
+    Persist results dict to cache file using an atomic write.
+    Writes to a temp file first, then renames — so a crash during
+    writing never leaves a corrupted cache file behind.
+    """
     path = _cache_path(base_dir)
-    path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        dir_path = path.parent
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=dir_path,
+            delete=False,
+            suffix=".tmp",
+        ) as tmp:
+            json.dump(results, tmp, indent=2, ensure_ascii=False)
+            tmp_path = tmp.name
+        # Atomic on POSIX (Linux/Mac). On Windows this is near-atomic.
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        logger.error(
+            "CACHE WRITE FAILED — grading continues but progress "
+            "will not survive a crash. Reason: %s", exc
+        )
 
 
 def clear_cache(base_dir: str) -> None:

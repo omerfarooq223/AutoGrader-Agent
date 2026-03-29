@@ -22,8 +22,8 @@ from utils.retry import retry_api_call
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".py", ".cpp", ".ipynb"}
+MAX_FILE_SIZE_MB = 20  # Files larger than this are skipped — LLM context would overflow
 
-_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 _VISION_PROMPT = (
     "Describe what is shown in this image in the context of a student assignment. "
     "Be specific about any code output, charts, diagrams, or handwritten content you see."
@@ -103,7 +103,19 @@ def read_docx(file_path: str) -> str:
     """Extract text and embedded images from a DOCX file using python-docx."""
     doc = Document(file_path)
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    text = "\n".join(paragraphs)
+
+    # Extract table content — tables are not in doc.paragraphs
+    table_parts: list[str] = []
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = " | ".join(
+                cell.text.strip() for cell in row.cells if cell.text.strip()
+            )
+            if row_text:
+                table_parts.append(row_text)
+
+    all_parts = paragraphs + (["[Table Content]"] + table_parts if table_parts else [])
+    text = "\n".join(all_parts)
 
     if config.EXTRACT_IMAGES:
         try:
@@ -147,7 +159,25 @@ def read_notebook(file_path: str) -> str:
         if cell_type == "markdown":
             parts.append(f"[Markdown]\n{source}")
         elif cell_type == "code":
-            parts.append(f"[Code]\n{source}")
+            cell_part = f"[Code]\n{source}"
+            # Include cell outputs — printed results, errors, and return values
+            outputs = cell.get("outputs", [])
+            output_texts = []
+            for output in outputs:
+                # Stream output (print statements)
+                if output.get("output_type") in ("stream", "display_data"):
+                    output_texts.append("".join(output.get("text", [])))
+                # Execution result (last expression value)
+                elif output.get("output_type") == "execute_result":
+                    output_texts.append("".join(output.get("text", [])))
+                # Errors and tracebacks
+                elif output.get("output_type") == "error":
+                    output_texts.append(
+                        f"ERROR: {output.get('ename')}: {output.get('evalue')}"
+                    )
+            if output_texts:
+                cell_part += f"\n[Output]\n{''.join(output_texts)}"
+            parts.append(cell_part)
 
     return "\n\n".join(parts).strip()
 
@@ -210,14 +240,41 @@ def collect_submissions(
 
             full_path = os.path.join(root, filename)
             try:
+                file_size_mb = os.path.getsize(full_path) / (1024 * 1024)
+                if file_size_mb > MAX_FILE_SIZE_MB:
+                    logger.warning(
+                        "Skipping %s — file size %.1fMB exceeds limit of %dMB",
+                        filename, file_size_mb, MAX_FILE_SIZE_MB
+                    )
+                    submissions.append({
+                        "filename":  filename,
+                        "path":      full_path,
+                        "content":   f"[SKIPPED: File too large ({file_size_mb:.1f}MB). Student must resubmit.]",
+                        "cache_key": filename,
+                        "error":     "file_too_large",
+                    })
+                    continue
                 content = read_file(full_path)
             except Exception as e:
-                content = f"[ERROR reading file: {e}]"
+                logger.error("Failed to read %s: %s", filename, e)
+                content = None
 
+            from utils.cache import _make_safe_key
+            if content is None:
+                submissions.append({
+                    "filename":  filename,
+                    "path":      full_path,
+                    "content":   "[ERROR: File could not be read. Student must resubmit.]",
+                    "cache_key": filename,
+                    "error":     "read_failed",
+                })
+                continue
+            cache_key = _make_safe_key(filename, content)
             submissions.append({
-                "filename": filename,
-                "path":     full_path,
-                "content":  content,
+                "filename":  filename,
+                "path":      full_path,
+                "content":   content,
+                "cache_key": cache_key,
             })
 
     return submissions
@@ -226,10 +283,13 @@ def collect_submissions(
 def extract_and_collect(
     zip_path: str,
     exclude_filenames: list[str] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], str]:
     """
-    Convenience function: extract a ZIP file, collect and read all supported
-    submissions inside it, then clean up the temp directory.
+    Extract a ZIP file and collect all supported submissions.
+
+    Returns (submissions, extract_dir) — caller is responsible for
+    cleaning up extract_dir after grading completes. This preserves
+    the cache file for crash recovery during long grading sessions.
 
     Parameters
     ----------
@@ -237,7 +297,5 @@ def extract_and_collect(
     exclude_filenames : Optional filenames to exclude (e.g. answer key filename).
     """
     extract_dir = extract_zip(zip_path)
-    try:
-        return collect_submissions(extract_dir, exclude_filenames=exclude_filenames)
-    finally:
-        shutil.rmtree(extract_dir, ignore_errors=True)
+    submissions = collect_submissions(extract_dir, exclude_filenames=exclude_filenames)
+    return submissions, extract_dir
