@@ -5,9 +5,9 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 ## What It Does
 
 - Accepts a **ZIP of student submissions** + an **assignment brief**
-- Generates a **structured grading rubric** via LLM (Groq / LLaMA 3.3 70B) as validated JSON with per-criterion scoring — uses **rubric templates** when a matching assignment type is detected, human approval required
+- Generates a **structured grading rubric** via LLM (Groq / Gemini) as validated JSON with per-criterion scoring — uses **rubric templates** when a matching assignment type is detected, human approval required
 - Lets you provide or generate an **answer key/solution** (manual, file upload, or LLM-generated) for accurate grading
-- **Grades each submission** against the rubric — scores every criterion individually, then sums to a total with auditable subscores; **auto-corrects** if the LLM's total doesn't match the category sum
+- **Grades each submission** against the rubric — LLM evaluates each criterion and provides a score with a brief reason; **all math is done by Python** (totals, deduction amounts, deduction text formatting, score capping)
 - **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram)
 - Outputs a styled **Excel report** with per-criterion breakdown, class statistics, and **LLM-generated class insights** (top 3 common mistakes)
 

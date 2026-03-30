@@ -164,10 +164,10 @@ def _collect_all_categories(results: list[dict]) -> list[str]:
     return sorted(cats)
 
 
-def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict]) -> None:
+def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict], sheet_title: str = "") -> None:
     """Write the main Grading Report sheet."""
     ws = wb.active
-    ws.title = "Grading Report"
+    ws.title = (sheet_title[:31] if sheet_title else "Grading Report")  # Excel 31 char limit
 
     categories = _collect_all_categories(results)
 
@@ -213,12 +213,9 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict]) -> None:
             ws.cell(row=row_idx, column=col, value=value)
             col += 1
 
-        # Deductions — strip internal system notes before displaying
-        raw_deductions = entry.get("deductions", "") or ""
-        clean_deductions = re.sub(
-            r"\s*\[Score (capped|adjusted)[^\]]*\]", "", raw_deductions
-        ).strip()
-        ws.cell(row=row_idx, column=col, value=clean_deductions)
+        # Deductions — now built deterministically by Python in grader_agent
+        deductions = entry.get("deductions", "") or "No deductions."
+        ws.cell(row=row_idx, column=col, value=deductions)
         col += 1
 
         # Plagiarism flag — shortened
@@ -235,7 +232,9 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict]) -> None:
     _auto_width(ws)
 
 
-def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict]) -> tuple:
+def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict],
+                       assignment_name: str = "", course_code: str = "",
+                       semester: str = "") -> tuple:
     """Write a Summary Statistics sheet. Returns (worksheet, last_row)."""
     ws = wb.create_sheet("Summary Statistics")
 
@@ -243,7 +242,14 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict]) -> tuple:
     total_students = len(results)
     error_entries  = [r for r in results if r.get("marks") == "Error"]
 
-    stats_data = [
+    stats_data = []
+    if assignment_name:
+        label = assignment_name
+        if course_code: label = f"{course_code} — {label}"
+        if semester:    label = f"{label} ({semester})"
+        stats_data.append(("Assignment", label))
+        stats_data.append(("", ""))
+    stats_data += [
         ("Total Submissions",      total_students),
         ("Graded (numeric marks)", len(marks)),
         ("Grading errors",         len(error_entries)),
@@ -342,6 +348,9 @@ def write_results(
     results: list[dict],
     output_path: str = "results.xlsx",
     return_insights: bool = False,
+    assignment_name: str = "",
+    course_code: str = "",
+    semester: str = "",
 ) -> str | tuple[str, list[str]]:
     """
     Write grading results to an Excel file with two sheets:
@@ -351,8 +360,11 @@ def write_results(
     Returns the path to the written file.
     """
     wb = openpyxl.Workbook()
-    _write_grading_sheet(wb, results)
-    ws_stats, last_row = _write_stats_sheet(wb, results)
+    _write_grading_sheet(wb, results, sheet_title=assignment_name or "Grading Report")
+    ws_stats, last_row = _write_stats_sheet(wb, results,
+                                            assignment_name=assignment_name,
+                                            course_code=course_code,
+                                            semester=semester)
 
     insights = generate_class_insights(results)
     if insights:

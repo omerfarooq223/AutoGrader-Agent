@@ -46,6 +46,7 @@ _DEFAULTS = {
     "rubric_mode": "manual",
     "grading_in_progress": False,
     "rubric_key_v": 0,
+    "lms_meta": {},
 }
 
 for k, v in _DEFAULTS.items():
@@ -560,22 +561,19 @@ if zip_file and brief_file:
                 if isinstance(rubric_obj, dict) and "criteria" in rubric_obj:
                     import re as _re
                     def _split_bands(desc: str, max_score) -> tuple:
-                        """Extract full/partial/minimal bands from description string."""
-                        # Find all [N Marks]: text patterns
-                        parts = _re.split(r'\[\d+\s*Marks?\]:', desc, flags=_re.IGNORECASE)
-                        labels = _re.findall(r'\[(\d+)\s*Marks?\]:', desc, flags=_re.IGNORECASE)
-                        if len(parts) >= 4:  # leading empty + 3 sections
-                            full    = parts[1].strip()
-                            partial = parts[2].strip()
-                            minimal = parts[3].strip()
-                            return full, partial, minimal
+                        """Extract full/partial/minimal bands — supports [N Marks]: and [Full]/[Partial]/[Minimal]."""
+                        parts = _re.split(r'\[(?:\d+\s*Marks?|Full|Partial|Minimal)\]:\s*', desc, flags=_re.IGNORECASE)
+                        if len(parts) >= 4:
+                            return parts[1].strip(), parts[2].strip(), parts[3].strip()
+                        elif len(parts) == 3:
+                            return parts[1].strip(), parts[2].strip(), ""
                         return desc, "", ""
 
                     # Build header using actual score values from rubric
                     criteria = rubric_obj.get("criteria", [])
                     # Check if any criterion has band descriptions
                     has_bands = any(
-                        _re.search(r'\[\d+\s*Marks?\]', c.get("description",""), _re.IGNORECASE)
+                        _re.search(r'\[(\d+\s*Marks?|Full|Partial|Minimal)\]', c.get("description",""), _re.IGNORECASE)
                         for c in criteria
                     )
                     if has_bands:
@@ -838,7 +836,16 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xl:
                 report_path = tmp_xl.name
             # Save report immediately — don't block on LLM insights call
-            write_results(results, report_path, return_insights=False)
+            # Extract assignment metadata from first submission with lms_meta
+            _lms = next((s.get("lms_meta", {}) for s in submissions
+                         if s.get("lms_meta", {}).get("assignment_name")), {})
+            st.session_state.lms_meta = _lms
+            write_results(
+                results, report_path, return_insights=False,
+                assignment_name=_lms.get("assignment_name", ""),
+                course_code=_lms.get("course_code", ""),
+                semester=_lms.get("semester", ""),
+            )
             clear_cache(session_dir)  # Clear only after report successfully written
             # Generate insights in background so UI stays responsive
             def _gen_insights():
@@ -924,10 +931,19 @@ if st.session_state.results is not None:
         st.dataframe(df[table_cols], use_container_width=True, hide_index=True)
 
     st.write("")
+    # Build filename from LMS metadata: "CC323 - Assignment 2 - F2025.xlsx"
+    _dl_lms = st.session_state.get("lms_meta", {})
+    _parts = [p for p in [
+        _dl_lms.get("course_code", ""),
+        _dl_lms.get("assignment_name", ""),
+        _dl_lms.get("semester", ""),
+    ] if p]
+    _dl_filename = " - ".join(_parts) + ".xlsx" if _parts else config.OUTPUT_FILENAME
+
     st.download_button(
         "Download Excel Report",
         data=st.session_state.report_bytes,
-        file_name=config.OUTPUT_FILENAME,
+        file_name=_dl_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )

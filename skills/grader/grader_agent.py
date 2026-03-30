@@ -1,10 +1,11 @@
 """
 Grader Agent — grades each submission against the approved rubric
-using the Groq API (LLaMA 3.3 70B).
+using the LLM (Groq primary, Gemini fallback).
 
 Features:
   - Concurrent grading via ThreadPoolExecutor
-  - Per-category rubric breakdown with score validation
+  - Deterministic Python scoring (totals, deductions, capping)
+  - Per-category rubric breakdown with criterion name validation
   - Retry with exponential backoff
   - Cache-aware (skip already-graded files)
   - Answer key support for comparison-based grading
@@ -59,35 +60,65 @@ def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> s
     return call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
 
 
-def _clean_name(raw_name: str, filename: str) -> str:
+def _build_rubric_maxes(rubric: str | dict | None) -> dict[str, float]:
+    """Parse the rubric to get max_score per criterion name."""
+    if not rubric:
+        return {}
+    try:
+        obj = json.loads(rubric) if isinstance(rubric, str) else rubric
+        return {
+            c["name"]: float(c.get("max_score", 100))
+            for c in obj.get("criteria", [])
+        }
+    except Exception:
+        return {}
+
+
+def _match_criterion_name(llm_name: str, rubric_names: list[str]) -> str | None:
     """
-    Clean extracted student name:
-    - Strip file extensions, IDs, and extra tokens that look like filenames
-    - Return 'NOT FOUND' if the name looks like a filename or ID
+    Fuzzy-match an LLM-returned criterion name to the closest rubric criterion.
+    Returns the matched rubric name, or None if no reasonable match found.
     """
-    if not raw_name or raw_name in ("", "N/A", "NOT FOUND"):
-        return "NOT FOUND"
+    llm_lower = llm_name.strip().lower()
 
-    # If it looks like a filename (has extension), strip it
-    name = re.sub(r'\.(docx?|pdf|py|cpp|ipynb|txt)$', '', raw_name, flags=re.IGNORECASE).strip()
+    # 1. Exact match
+    for rn in rubric_names:
+        if rn.lower() == llm_lower:
+            return rn
 
-    # Remove common ID patterns that leak into the name field (e.g. F2023376425)
-    name = re.sub(r'\b[A-Z]{1,3}\d{6,}\b', '', name).strip()
+    # 2. Substring match (either direction)
+    for rn in rubric_names:
+        if llm_lower in rn.lower() or rn.lower() in llm_lower:
+            return rn
 
-    # Remove leading/trailing underscores, hyphens, digits
-    name = re.sub(r'^[\s_\-\d]+|[\s_\-\d]+$', '', name).strip()
+    # 3. Word overlap — match if ≥50% of rubric criterion words appear
+    llm_words = set(llm_lower.split())
+    best_match, best_overlap = None, 0.0
+    for rn in rubric_names:
+        rn_words = set(rn.lower().split())
+        if not rn_words:
+            continue
+        overlap = len(llm_words & rn_words) / len(rn_words)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_match = rn
+    if best_overlap >= 0.5:
+        return best_match
 
-    # If what's left is empty or looks like a path/filename, return NOT FOUND
-    if not name or '/' in name or '\\' in name or name.lower() == filename.lower():
-        return "NOT FOUND"
-
-    return name
+    return None
 
 
-def _parse_json(raw: str, fallback_name: str, rubric: str = None) -> dict:
+def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str = "") -> dict:
     """
-    Extract JSON from an LLM response, handle code fences, validate scores,
-    enforce per-criterion max_score caps, and clean the student name field.
+    Extract JSON from an LLM response, then apply deterministic Python
+    logic to compute totals, cap scores, and build deduction text.
+
+    The LLM returns per-criterion scores and reasons.  ALL math is done here:
+      - Fuzzy-match criterion names to rubric
+      - Cap each score to its max_score
+      - Fill missing criteria with score 0
+      - Sum scores → total marks
+      - Build deduction text from (max_score − score) per criterion
     """
     text = raw
     if text.startswith("```"):
@@ -96,7 +127,7 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None) -> dict:
     try:
         result = json.loads(text)
     except json.JSONDecodeError:
-        # Try brace-matching to extract partial JSON before giving up
+        # Try brace-matching to extract partial JSON
         start = text.find("{")
         recovered = None
         if start != -1:
@@ -114,170 +145,160 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None) -> dict:
                 pass
         if recovered is None:
             return {
-                "name":            fallback_name,
+                "name":            lms_name or fallback_name,
                 "id":              fallback_name,
                 "marks":           "Error",
                 "deductions":      f"Could not parse LLM response: {raw[:300]}",
                 "category_scores": {},
-                "feedback":        "",
             }
         result = recovered
 
-    # Clean name — use filename as fallback if name not found in submission
-    cleaned_name = _clean_name(result.get("name", ""), fallback_name)
-    result["name"] = cleaned_name if cleaned_name != "NOT FOUND" else fallback_name
+    # ── Name: always use LMS folder name, LLM is fallback ──
+    if lms_name:
+        result["name"] = lms_name
+    else:
+        raw_name = result.get("name", "") or ""
+        cleaned = re.sub(r'\.(docx?|pdf|py|cpp|ipynb|txt)$', '', raw_name, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'\b[A-Z]{1,3}\d{6,}\b', '', cleaned).strip()
+        cleaned = re.sub(r'^[\s_\-\d]+|[\s_\-\d]+$', '', cleaned).strip()
+        result["name"] = cleaned if cleaned else fallback_name
 
-    # Normalize deductions — LLM sometimes returns a list instead of a string
-    deductions = result.get("deductions", "")
-    if isinstance(deductions, list):
-        result["deductions"] = " ".join(str(d) for d in deductions)
-    elif deductions is None:
-        result["deductions"] = ""
-
-    # Clean ID — use filename as fallback if ID not found in submission
+    # ── ID: LLM extracts from file content, filename as fallback ──
     raw_id = str(result.get("id", "")).strip()
     if not raw_id or raw_id.lower() in ("n/a", "not found", "none", ""):
         result["id"] = fallback_name
     else:
         result["id"] = raw_id
 
-    # ── Post-process: apply deductions written in text to actual scores ──
-    # The LLM often writes "CriterionName: reason (-N)" but forgets to subtract.
-    # Parse deduction text and enforce it against category_scores non-LLM style.
-    deduction_text = result.get("deductions", "") or ""
+    # ── Deterministic scoring — ALL math done in Python ──
+    max_scores = _build_rubric_maxes(rubric)
+    rubric_names = list(max_scores.keys())
     cat_scores_raw = result.get("category_scores", {})
-    if deduction_text and cat_scores_raw and isinstance(cat_scores_raw, dict):
-        import re as _re
-        # Match patterns like "Mutual Exclusion: some reason (-3)"
-        # or "Deadlock Detection: explanation (-1)"
-        deduction_pattern = _re.compile(
-            r'([A-Za-z][A-Za-z\s]+?):\s+[^(]*\(-\s*(\d+(?:\.\d+)?)\)',
-            _re.IGNORECASE
-        )
-        # Accumulate total deductions per criterion name
-        criterion_deductions: dict[str, float] = {}
-        for match in deduction_pattern.finditer(deduction_text):
+
+    # Normalize category_scores — handle both formats:
+    #   New format: {"CritName": {"score": N, "reason": "..."}, ...}
+    #   Old format (cached): {"CritName": N, ...}
+    cat_scores: dict[str, float] = {}
+    cat_reasons: dict[str, str] = {}
+
+    for k, v in cat_scores_raw.items():
+        if isinstance(v, dict):
+            score = v.get("score", 0)
+            reason = v.get("reason", "") or ""
+        elif isinstance(v, (int, float)):
+            score = v
+            reason = ""
+        else:
+            continue
+
+        # Fuzzy-match LLM criterion name to rubric criterion name
+        matched_name = _match_criterion_name(k, rubric_names) if rubric_names else None
+        canonical_name = matched_name or k
+
+        # Cap score to max_score (never exceed rubric max, never go below 0)
+        cap = max_scores.get(canonical_name, 100)
+        score = max(0.0, min(float(score), cap))
+        cat_scores[canonical_name] = score
+        cat_reasons[canonical_name] = reason.strip()
+
+    # Validate: ensure ALL rubric criteria have scores — fill missing with 0
+    for rubric_crit, rubric_max in max_scores.items():
+        if rubric_crit not in cat_scores:
+            cat_scores[rubric_crit] = 0.0
+            cat_reasons[rubric_crit] = "criterion not evaluated by grader"
+            logger.warning("LLM omitted criterion '%s' — assigning 0.", rubric_crit)
+
+    # If LLM returned no reasons (old format / cached), try extracting from
+    # LLM's deductions field to preserve backward compatibility
+    if not any(cat_reasons.values()):
+        old_deductions = result.get("deductions", "") or ""
+        if isinstance(old_deductions, list):
+            old_deductions = ", ".join(str(d) for d in old_deductions)
+        for match in re.finditer(
+            r'([A-Za-z][A-Za-z\s]+?):\s+([^(,;|]+?)\s*\(-\s*\d+(?:\.\d+)?\)',
+            old_deductions,
+        ):
             crit_raw = match.group(1).strip()
-            amount   = float(match.group(2))
-            # Find closest matching key in category_scores
-            matched_key = None
-            for k in cat_scores_raw:
+            reason_text = match.group(2).strip()
+            for k in cat_scores:
                 if crit_raw.lower() in k.lower() or k.lower() in crit_raw.lower():
-                    matched_key = k
+                    if not cat_reasons.get(k):
+                        cat_reasons[k] = reason_text
+                    else:
+                        cat_reasons[k] += f", {reason_text}"
                     break
-            if matched_key:
-                criterion_deductions[matched_key] = (
-                    criterion_deductions.get(matched_key, 0) + amount
-                )
-        # Apply deductions to category scores
-        if criterion_deductions:
-            rubric_maxes: dict[str, float] = {}
-            if rubric:
-                try:
-                    import json as _j
-                    robj = _j.loads(rubric) if isinstance(rubric, str) else rubric
-                    for c in robj.get("criteria", []):
-                        rubric_maxes[c["name"]] = float(c.get("max_score", 100))
-                except Exception:
-                    pass
-            adjusted = False
-            for k, deduct in criterion_deductions.items():
-                if k in cat_scores_raw and isinstance(cat_scores_raw[k], (int, float)):
-                    cap = rubric_maxes.get(k, 100)
-                    new_score = max(0.0, min(cap, float(cat_scores_raw[k]) - deduct))
-                    if new_score != cat_scores_raw[k]:
-                        cat_scores_raw[k] = new_score
-                        adjusted = True
-            if adjusted:
-                result["category_scores"] = cat_scores_raw
-                new_total = sum(
-                    v for v in cat_scores_raw.values()
-                    if isinstance(v, (int, float))
-                )
-                result["marks"] = new_total
 
-    # Validate: cap individual scores to their max_score, then fix total
-    cat_scores = result.get("category_scores", {})
-    if cat_scores and isinstance(cat_scores, dict):
-        # Build max_score lookup from rubric to enforce per-criterion caps
-        max_scores: dict[str, float] = {}
-        if rubric:
-            try:
-                import json as _json
-                rubric_obj = _json.loads(rubric) if isinstance(rubric, str) else rubric
-                for criterion in rubric_obj.get("criteria", []):
-                    max_scores[criterion["name"]] = float(criterion.get("max_score", 100))
-            except Exception:
-                pass
+    # Compute total marks — pure Python, never trust LLM's total
+    if cat_scores:
+        total_float = sum(cat_scores.values())
+        # Display as int when all scores are whole numbers (13.0 → 13)
+        total_marks = int(total_float) if total_float == int(total_float) else total_float
+    else:
+        total_marks = result.get("marks", "Error")
 
-        corrections = []
-        for k, v in cat_scores.items():
-            if not isinstance(v, (int, float)):
-                continue
-            cap = max_scores.get(k, 100)
-            if v > cap:
-                cat_scores[k] = cap
-                corrections.append(f"{k} capped at {cap}")
+    # Build deduction text — pure Python
+    # Format: "CriterionName: reason (-N)" for each criterion where score < max
+    deduction_parts: list[str] = []
+    for k, score in cat_scores.items():
+        cap = max_scores.get(k, 100)
+        deducted = cap - score
+        if deducted > 0:
+            reason = cat_reasons.get(k, "marks deducted")
+            if not reason:
+                reason = "marks deducted"
+            ded_display = int(deducted) if deducted == int(deducted) else deducted
+            deduction_parts.append(f"{k}: {reason} (-{ded_display})")
 
-        if corrections:
-            deductions = result.get("deductions", "") or ""
-            note = "[Score capped to rubric max: " + ", ".join(corrections) + "]"
-            result["deductions"] = f"{deductions} {note}".strip()
+    deductions_str = ", ".join(deduction_parts) if deduction_parts else "No deductions."
 
-        numeric_scores = [v for v in cat_scores.values() if isinstance(v, (int, float))]
-        if numeric_scores:
-            correct_sum = sum(numeric_scores)
-            marks = result.get("marks")
-            if isinstance(marks, (int, float)) and marks != correct_sum:
-                result["marks"] = correct_sum
-                deductions = result.get("deductions", "") or ""
-                correction = "[Score adjusted to match rubric total]"
-                result["deductions"] = f"{deductions} {correction}".strip()
+    result["category_scores"] = cat_scores
+    result["marks"] = total_marks
+    result["deductions"] = deductions_str
+    result.pop("feedback", None)  # Remove unused legacy field
 
     return result
 
 
 SYSTEM_PROMPT = (
-    "You are an expert academic grader. You will receive a structured JSON "
-    "grading rubric and a student submission.\n\n"
+    "You are a STRICT academic grader. You will receive a structured JSON "
+    "grading rubric, a student submission, and possibly an answer key.\n\n"
     "The rubric contains a 'criteria' array. Each criterion has 'name', "
     "'max_score', and 'description'.\n\n"
-    "Your job is to:\n"
-    "1. Extract the student's FULL NAME from the submission content. "
-    "Look for patterns like 'Name:', 'Student:', 'Submitted by:', or a name "
-    "written at the top of the document. Return ONLY the name — no IDs, no "
-    "filenames, no extra text. If you cannot find a name, return 'NOT FOUND'.\n"
-    "2. Extract the student ID. Look for patterns like 'ID:', 'Roll No:', "
-    "'Registration:', or alphanumeric codes like 'F2021-CS-045'. "
+    "GRADING PROCESS — follow these steps IN ORDER:\n"
+    "1. Extract the student ID from the submission content. "
+    "Look for patterns like 'ID:', 'Roll No:', 'Registration:', "
+    "or alphanumeric codes like 'F2023376425'. "
     "If not found, return 'NOT FOUND'. Do NOT guess or invent an ID.\n"
-    "3. Score EACH criterion from 0 to its max_score. "
-    "NEVER exceed max_score for any criterion. "
-    "If work is flawed, deduct from the score — do NOT give max_score and then "
-    "list deductions separately. The score IS the verdict.\n"
-    "4. Sum criterion scores to get total marks.\n"
-    "5. For each mark deducted, write ONE line in this exact format: "
-    "'CriterionName: reason in 4-6 words (-N marks)'. "
-    "Example: 'Deadlock Detection: vague RAG explanation (-1)'. "
-    "If no marks deducted anywhere, write 'No deductions.' "
-    "Never write paragraphs. Never explain what was correct.\n\n"
-    "For EACH criterion, before scoring ask yourself: does this submission "
-    "FULLY satisfy every requirement for the highest band? If there is ANY "
-    "error, vagueness, or omission — even minor — you MUST deduct at least 1 mark. "
-    "A score of max_score means the work is flawless for that criterion.\n\n"
+    "2. For EACH criterion, FIRST identify ALL flaws, errors, omissions, "
+    "and vague statements in the submission. Compare against the answer key "
+    "if provided. List what is WRONG or MISSING before deciding the score.\n"
+    "3. THEN assign a score based on the flaws found. "
+    "If you found ANY flaw, the score MUST be less than max_score.\n"
+    "4. Write a reason for EVERY criterion — explain what the student did "
+    "or what they missed. This is REQUIRED even for full marks.\n\n"
+    "SCORING RULES:\n"
+    "- A score of max_score means ZERO flaws — the work is perfect for that criterion.\n"
+    "- If the explanation is vague, generic, or lacks specifics → deduct.\n"
+    "- If key concepts are missing or incomplete → deduct.\n"
+    "- If the answer is mostly correct but has minor issues → deduct at least 1.\n"
+    "- Compare CAREFULLY against the answer key when provided. "
+    "Missing any point from the answer key = deduction.\n"
+    "- You are grading UNIVERSITY students, not high school. Be rigorous.\n\n"
     "Respond ONLY with this exact JSON — no markdown, no extra fields:\n"
     "{\n"
-    '  "name": "<student full name or NOT FOUND>",\n'
     '  "id": "<student ID or NOT FOUND>",\n'
-    '  "marks": <total — must equal sum of category_scores>,\n'
-    '  "category_scores": {"Criterion Name": <score>, ...},\n'
-    '  "deductions": "<list only actual deductions, or No deductions.>"\n'
+    '  "category_scores": {\n'
+    '    "Criterion Name": {"score": <0 to max_score>, "reason": "<what was right/wrong>"},\n'
+    '    ...\n'
+    '  }\n'
     "}\n\n"
     "CRITICAL RULES:\n"
-    "- 'name' must be ONLY the student name — never a filename, ID, or path.\n"
-    "- Each category score must be between 0 and its max_score. Never exceed max_score.\n"
-    "- 'marks' must equal the exact sum of all category_scores.\n"
-    "- Do NOT include a 'feedback' field or any field not listed above.\n"
-    "- If score is max_score for a criterion, deductions for it must be empty."
+    "- Each score must be between 0 and its max_score. Never exceed max_score.\n"
+    "- reason is REQUIRED for every criterion. Never leave it empty.\n"
+    "- Do NOT include 'name', 'marks', 'deductions', or 'feedback' fields.\n"
+    "- Do NOT write (-N) amounts. Just give the score and reason.\n"
+    "- Do NOT calculate totals. Only provide per-criterion scores.\n"
+    "- MOST submissions have flaws. Giving full marks to every criterion is almost never correct."
 )
 
 
@@ -287,10 +308,12 @@ def grade_submission(
     filename: str,
     answer_key: str = None,
     cancel_event: threading.Event = None,
+    lms_name: str = "",
 ) -> dict:
     """
     Grade a single student submission with retry logic.
     If answer_key is provided, the LLM compares the submission to it.
+    If lms_name is provided, it overrides LLM name extraction.
     """
     # Build allowed scores note from rubric bands — forces discrete grading
     def _build_allowed_scores(rubric_str: str) -> str:
@@ -315,7 +338,7 @@ def grade_submission(
     allowed_scores_note = _build_allowed_scores(rubric)
 
     if answer_key:
-        logger.warning("DEBUG: Answer key present — length %d chars", len(answer_key))
+        logger.info("Answer key present — length %d chars", len(answer_key))
         rubric_text = _trim_text(rubric, MAX_RUBRIC_CHARS, "Rubric")
         answer_key_text = _trim_text(answer_key, MAX_ANSWER_KEY_CHARS, "Answer key")
         submission_for_llm = _trim_text(submission_text, MAX_SUBMISSION_CHARS, "Submission")
@@ -343,12 +366,11 @@ def grade_submission(
     # return a clean error instead of sending empty content to LLM
     if not submission_for_llm or len(submission_for_llm.strip()) < 50:
         return {
-            "name":            filename,
+            "name":            lms_name or filename,
             "id":              filename,
             "marks":           "Error",
             "category_scores": {},
             "deductions":      "[No readable text found — likely a scanned image. Enable EXTRACT_IMAGES=True or convert to searchable PDF.]",
-            "feedback":        "",
         }
 
     raw = retry_api_call(
@@ -358,7 +380,7 @@ def grade_submission(
         cancel_event=cancel_event,
         max_tokens=GRADING_MAX_OUTPUT_TOKENS,
     )
-    return _parse_json(raw, filename, rubric=rubric)
+    return _parse_json(raw, filename, rubric=rubric, lms_name=lms_name)
 
 
 def grade_all(
@@ -410,11 +432,9 @@ def grade_all(
         if cancel_event.is_set():
             raise InterruptedError("Cancelled")
         
-        # Artificially throttle API calls to prevent rate limits.
-        # Since MAX_CONCURRENT_GRADES=1, a 20.0s sleep gives ~3 requests per minute.
-        # For long assignments (5+ pages), we increase the delay to 40s to ensure 
-        # the Token-Per-Minute quota replenishes fully.
-        # llama-3.1-8b-instant has ~5x higher TPM than 70B — shorter sleep is safe
+        # Throttle API calls to prevent rate limits.
+        # With MAX_CONCURRENT_GRADES=1, 30s sleep ≈ 2 requests/min.
+        # Large submissions use 60s to allow TPM quota recovery.
         base_sleep = 30.0
         if len(sub["content"]) > 5000:
             base_sleep = 60.0
@@ -422,12 +442,14 @@ def grade_all(
         
         time.sleep(base_sleep)
         
+        lms_name = sub.get("lms_meta", {}).get("student_name", "")
         result = grade_submission(
             rubric,
             sub["content"],
             sub["filename"],
             answer_key=answer_key,
             cancel_event=cancel_event,
+            lms_name=lms_name,
         )
         result["filename"] = sub["filename"]
         result["cache_key"] = sub.get("cache_key", sub["filename"])
@@ -444,12 +466,11 @@ def grade_all(
             except Exception as exc:
                 logger.error("Failed to grade %s: %s", sub["filename"], exc)
                 result = {
-                    "name":            sub["filename"],
+                    "name":            sub.get("lms_meta", {}).get("student_name") or sub["filename"],
                     "id":              "N/A",
                     "marks":           "Error",
                     "category_scores": {},
                     "deductions":      f"Grading failed: {exc}",
-                    "feedback":        "",
                     "filename":        sub["filename"],
                 }
             results.append(result)

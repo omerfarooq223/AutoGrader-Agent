@@ -11,6 +11,9 @@ Generates the final Excel grading report with styled formatting, per-criterion b
 |-------|------|--------|
 | `results` | `list[dict]` | Grading results with plagiarism flags applied |
 | `output_path` | `str` | Destination file path for the `.xlsx` |
+| `assignment_name` | `str` | Optional — used as Excel sheet title |
+| `course_code` | `str` | Optional — shown in summary statistics |
+| `semester` | `str` | Optional — shown in summary statistics |
 
 ## Outputs
 | Output | Type | Description |
@@ -22,11 +25,11 @@ Generates the final Excel grading report with styled formatting, per-criterion b
 ### Sheet 1: Grading Report
 | Column | Source |
 |--------|--------|
-| Name | Extracted from submission |
-| ID | Extracted from submission |
-| Marks | Total score (green = pass, red = fail) |
+| Name | From LMS folder name (Python-extracted, not LLM) |
+| ID | Extracted from submission content by LLM |
+| Marks | Total score — computed by Python as sum of category scores (green = pass, red = fail) |
 | [Criterion ...] | Dynamic columns from rubric criteria |
-| Deductions / Reason | LLM-generated deduction details |
+| Deductions / Reason | Built deterministically by Python: `"CritName: reason (-N)"` |
 | Plagiarism Flag | Similarity details (red bold if flagged) |
 
 ### Sheet 2: Summary Statistics
@@ -49,6 +52,6 @@ Generates the final Excel grading report with styled formatting, per-criterion b
 
 ## Dependencies
 - `openpyxl`
-- `groq` (Groq API client — for class insights)
-- `config.PASS_THRESHOLD`, `config.TOTAL_MARKS`, `config.MODEL`
+- `groq` / `google-genai` (for class insights LLM call)
+- `config.PASS_THRESHOLD`, `config.TOTAL_MARKS`
 - `utils.retry.retry_api_call`

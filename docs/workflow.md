@@ -60,14 +60,17 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 ### Step 6: Grading
 - Each submission + the structured JSON rubric (+ answer key if provided) is sent to **Groq llama-3.1-8b-instant**.
 - The model was switched from 3.3 70B to 3.1 8B Instant because: (a) 8B has ~5× higher free-tier TPM limit, (b) rubric-based grading against a provided answer key does not require strong open-ended reasoning — the LLM's job is comparison and scoring, not generation.
-- The LLM scores **each criterion individually** (0 to `max_score`), then sums to a total.
-- **Score validation (two levels):**
-  1. Per-criterion cap: each score is capped to its `max_score` from the rubric. Over-limit scores are corrected silently with a note appended to deductions.
-  2. Total consistency: if `marks` ≠ sum of `category_scores`, the total is auto-corrected.
-- **Deductions normalization**: if the LLM returns `deductions` as a list instead of a string, it is joined into a single string — prevents JSON parse failures.
+- **Student name**: Extracted from the LMS folder structure by Python (`_parse_lms_path()`), not by the LLM. LLM extraction is a fallback only for non-LMS ZIP files.
+- **Student ID**: Extracted by the LLM from submission file content (simple pattern-matching task).
+- **LLM response**: The LLM returns per-criterion scores and brief reasons only: `{id, category_scores: {CritName: {score, reason}}}`. The LLM does NOT calculate totals, write `(-N)` amounts, or format deduction strings.
+- **Deterministic Python scoring** (all math done in Python, never by the LLM):
+  1. Per-criterion cap: each score is capped to `max_score` from the rubric (never below 0).
+  2. Total: `marks = sum(category_scores)` — computed by Python.
+  3. Deduction text: Built by Python as `"CritName: reason (-N)"` where `N = max_score - score`. Deduction amounts are guaranteed correct since they're derived from the score, not from LLM text.
+  4. If all criteria have full marks: `"No deductions."`.
 - **Concurrency**: `MAX_CONCURRENT_GRADES=1` by default. Architecture supports higher parallelism via `.env` — but rate limits make >1 unsafe on free tier.
-- **Throttle**: 8s sleep between submissions (15s for large submissions >8k chars). Reduced from 20–40s after model switch due to higher TPM limit.
-- **Cache**: Each result is saved atomically to `.grading_cache.json` immediately after completion using `cache_key` as the key. Duplicate filenames are handled correctly. Atomic write (temp → rename) prevents cache corruption on crash.
+- **Throttle**: 30s sleep between submissions (60s for large submissions >5k chars). Ensures Token-Per-Minute quota replenishes.
+- **Cache**: Each result is saved atomically to `.grading_cache.json` immediately after completion using `cache_key` as the key. Cache files are **versioned** — when the scoring format changes, stale caches from prior versions are auto-discarded. Duplicate filenames are handled correctly. Atomic write (temp → rename) prevents cache corruption on crash.
 - **Retry**: Failed API calls are retried with exponential backoff. **429 rate limit errors parse the exact retry time from Groq's error message** and wait precisely that long before retrying Groq — never fall through to Gemini on rate limit. Other Groq failures fall through to Gemini fallback.
 - **Error submissions**: Files that could not be read (too large, corrupt, permission error) receive a clear error string as their content. These are graded with an "Error" mark — not silently passed through the LLM with garbage input.
 
@@ -105,9 +108,8 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 | Gemini daily quota exhausted (`limit: 0`) | Detected immediately, all Gemini fallbacks skipped with clear error |
 | Process crash mid-grading | Atomic cache survives; next run resumes from `cache_key` checkpoint |
 | Malformed LLM JSON | Graceful fallback with "Error" mark; raw response snippet in deductions |
-| LLM deductions returned as list | Joined to string before storage |
-| LLM total ≠ category sum | Auto-corrected; note appended to deductions |
-| Individual criterion score > max_score | Capped to rubric max; note appended to deductions |
+| Individual criterion score > max_score | Capped to rubric max by Python |
+| Stale cache from old scoring format | Auto-discarded via cache version check |
 | File too large (> 20MB) | Skipped with student-facing error message; grader sees it, scores 0 |
 | Corrupt/unreadable file | Error stored as content; submission not silently dropped |
 | Unsupported file format in ZIP | Skipped silently |

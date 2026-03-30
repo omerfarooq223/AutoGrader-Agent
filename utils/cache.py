@@ -19,6 +19,10 @@ from config import CACHE_FILENAME
 
 logger = logging.getLogger(__name__)
 
+# Bump this when the result format changes to auto-discard stale caches.
+# v2: deterministic Python scoring (scores/deductions computed in Python, not LLM)
+CACHE_VERSION = 2
+
 
 def _cache_path(base_dir: str) -> Path:
     return Path(base_dir) / CACHE_FILENAME
@@ -45,8 +49,17 @@ def load_cache(base_dir: str) -> dict[str, dict]:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        logger.info("Loaded cache with %d entries from %s", len(data), path)
-        return data
+        # Check version — discard stale caches from older scoring logic
+        if data.get("__cache_version__") != CACHE_VERSION:
+            logger.warning(
+                "Cache version mismatch (got %s, want %s) — discarding stale cache.",
+                data.get("__cache_version__"), CACHE_VERSION,
+            )
+            path.unlink()
+            return {}
+        entries = {k: v for k, v in data.items() if k != "__cache_version__"}
+        logger.info("Loaded cache with %d entries from %s", len(entries), path)
+        return entries
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Could not read cache (%s), starting fresh.", exc)
         return {}
@@ -61,6 +74,8 @@ def save_cache(base_dir: str, results: dict[str, dict]) -> None:
     path = _cache_path(base_dir)
     try:
         dir_path = path.parent
+        # Embed version marker so stale caches are auto-discarded on load
+        versioned = {"__cache_version__": CACHE_VERSION, **results}
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -68,7 +83,7 @@ def save_cache(base_dir: str, results: dict[str, dict]) -> None:
             delete=False,
             suffix=".tmp",
         ) as tmp:
-            json.dump(results, tmp, indent=2, ensure_ascii=False)
+            json.dump(versioned, tmp, indent=2, ensure_ascii=False)
             tmp_path = tmp.name
         # Atomic on POSIX (Linux/Mac). On Windows this is near-atomic.
         os.replace(tmp_path, path)

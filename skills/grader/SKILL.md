@@ -1,7 +1,7 @@
 # Grader — Skill Instructions
 
 ## Purpose
-Grades each student submission against the approved structured JSON rubric using the Groq API (LLaMA 3.3 70B). Scores every criterion individually before summing to a total, producing auditable per-criterion subscores alongside deductions and qualitative feedback.
+Grades each student submission against the approved structured JSON rubric using the LLM (Groq / Gemini). The LLM evaluates each criterion and provides a score with a brief reason. All scoring math (totals, deduction text, capping) is done deterministically in Python — the LLM never calculates totals or formats deduction strings.
 
 ## When to Invoke
 - After the rubric is approved and all submissions have been extracted.
@@ -10,34 +10,40 @@ Grades each student submission against the approved structured JSON rubric using
 | Input | Type | Source |
 |-------|------|--------|
 | `rubric` | `str` | Approved structured JSON rubric (`{"criteria": [...]}`) |
-| `submissions` | `list[dict]` | From file_extractor (`filename`, `path`, `content`) |
+| `submissions` | `list[dict]` | From file_extractor (`filename`, `path`, `content`, `lms_meta`) |
 | `cached` | `dict` | Previously graded results from cache (optional) |
+| `answer_key` | `str` | Optional model answer for comparison-based grading |
 
 ## Outputs
 | Output | Type | Description |
 |--------|------|-------------|
-| `results` | `list[dict]` | Each entry: `name`, `id`, `marks`, `category_scores`, `deductions`, `feedback` |
+| `results` | `list[dict]` | Each entry: `name`, `id`, `marks`, `category_scores`, `deductions` |
 
 ## Workflow
-1. Check cache — skip already-graded submissions.
-2. For each remaining submission, send the structured JSON rubric + content to LLaMA 3.3 70B.
-3. LLM scores each criterion individually (0 to `max_score`), then sums to total `marks`.
-4. LLM responds with structured JSON: `{name, id, marks, category_scores, deductions, feedback}`.
-5. The `category_scores` dict must contain one entry per rubric criterion, and `marks` must equal the sum.
-6. **Score validation**: After parsing, if `category_scores` is non-empty and its sum doesn't match `marks`, the total is auto-corrected and `[Auto-corrected: LLM total did not match category sum]` is appended to deductions.
-7. Parse JSON (handles code fences, malformed output gracefully).
-8. Save each result to cache immediately after grading.
+1. Check cache — skip already-graded submissions. Stale caches (wrong version) are auto-discarded.
+2. For each remaining submission, send the structured JSON rubric + content to the LLM.
+3. LLM returns per-criterion scores and brief reasons as `{id, category_scores: {CritName: {score, reason}}}`.
+4. **Python deterministic scoring** (no LLM math):
+   - Cap each score to `max_score` from rubric (never below 0, never above max).
+   - Compute `marks = sum(category_scores)`.
+   - Build deduction text: `"CritName: reason (-N)"` where N = `max_score - score`.
+   - If all criteria have full marks: `"No deductions."`.
+5. Student name comes from LMS folder structure (`lms_meta.student_name`), LLM is fallback only.
+6. Student ID is extracted by the LLM from file content.
+7. Save each result to cache immediately after grading.
 
 ## Concurrency
-- Uses `ThreadPoolExecutor` with `MAX_CONCURRENT_GRADES` workers (default: 4).
+- Uses `ThreadPoolExecutor` with `MAX_CONCURRENT_GRADES` workers (default: 1).
 - Each completed grading triggers `on_complete` callback for cache persistence.
 
 ## Key Functions
-- `_parse_json(raw, fallback_name)` — JSON extraction + score validation (auto-corrects mismatched totals)
-- `grade_submission(rubric, submission_text, filename)` — single submission grading with retry
-- `grade_all(rubric, submissions, cached, on_complete)` — concurrent batch grading
+- `_build_rubric_maxes(rubric)` — Parse rubric to get max_score per criterion
+- `_parse_json(raw, fallback_name, rubric, lms_name)` — JSON extraction + deterministic Python scoring
+- `grade_submission(rubric, submission_text, filename, answer_key, lms_name)` — single submission grading with retry
+- `grade_all(rubric, submissions, cached, on_complete, answer_key)` — concurrent batch grading
 
 ## Dependencies
-- `groq` (Groq API client)
+- `groq` (Groq API client) / `google-genai` (Gemini fallback)
 - `config.MODEL`, `config.MAX_CONCURRENT_GRADES`
 - `utils.retry.retry_api_call`
+- `utils.llm_client.call_llm`

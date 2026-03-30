@@ -203,6 +203,53 @@ def read_file(file_path: str) -> str:
     return reader(file_path)
 
 
+def _parse_lms_path(file_path: str, base_dir: str) -> dict:
+    """
+    Extract student name and assignment metadata from LMS folder structure.
+
+    Expected structure:
+      <base>/<id>-<course>-<batch>-<section> - <semester>-<assignment>-<id>/
+        <STUDENT NAME>_<number>_assignsubmission_file/
+          actual_file.ext
+    """
+    import re as _re
+    rel = os.path.relpath(file_path, base_dir)
+    parts = Path(rel).parts
+
+    student_name = ""
+    assignment_name = ""
+    course_code = ""
+    semester = ""
+
+    for part in parts:
+        # Student name folder: "ABDUL REHMAN NAEEM RIAZ_837796_assignsubmission_file"
+        name_match = _re.match(r"^([A-Za-z][A-Za-z\s]+?)_\d+_assignsubmission", part)
+        if name_match:
+            student_name = " ".join(name_match.group(1).split()).title()
+
+        # Assignment name from parent folder
+        assign_match = _re.search(r"(Assignment\s+\d+)", part, _re.IGNORECASE)
+        if assign_match:
+            assignment_name = assign_match.group(1).title()
+
+        # Course code e.g. CC323
+        course_match = _re.search(r"-([A-Z]{2,6}\d{3})-", part)
+        if course_match:
+            course_code = course_match.group(1)
+
+        # Semester e.g. F2025
+        sem_match = _re.search(r"[\s\-]((?:F|S|SP|FA)\d{4})[\s\-]", part, _re.IGNORECASE)
+        if sem_match:
+            semester = sem_match.group(1).upper()
+
+    return {
+        "student_name":    student_name,
+        "assignment_name": assignment_name,
+        "course_code":     course_code,
+        "semester":        semester,
+    }
+
+
 def collect_submissions(
     directory: str,
     exclude_filenames: list[str] | None = None,
@@ -273,11 +320,13 @@ def collect_submissions(
                 })
                 continue
             cache_key = _make_safe_key(filename, content)
+            lms_meta  = _parse_lms_path(full_path, directory)
             submissions.append({
                 "filename":  filename,
                 "path":      full_path,
                 "content":   content,
                 "cache_key": cache_key,
+                "lms_meta":  lms_meta,
             })
 
     return submissions
