@@ -216,7 +216,48 @@ def generate_rubric(brief_text: str) -> str:
     )
     rubric_dict = _scale_rubric_criteria(rubric_dict, total_marks)
 
-    return json.dumps(rubric_dict, indent=2, ensure_ascii=False)
+    result = json.dumps(rubric_dict, indent=2, ensure_ascii=False)
+    return _strip_marks_from_bands(result)
+
+
+def _strip_marks_from_bands(rubric_json_str: str) -> str:
+    """
+    Replace [N Marks]: / [N Mark]: with semantic labels in description fields.
+    Prevents LLM from confusing band scores with deduction amounts during grading.
+    Keeps the highest score as [Full], middle as [Partial], lowest as [Minimal].
+    """
+    import re as _re
+    try:
+        obj = json.loads(rubric_json_str)
+        for criterion in obj.get("criteria", []):
+            desc = criterion.get("description", "")
+            if not desc:
+                continue
+            # Find all [N Marks]: patterns and their positions
+            matches = list(_re.finditer(r"\[\d+\s*Marks?\]:", desc, _re.IGNORECASE))
+            if len(matches) >= 3:
+                # Sort by the number to assign Full/Partial/Minimal correctly
+                scored = sorted(
+                    matches,
+                    key=lambda m: int(_re.search(r"\d+", m.group()).group()),
+                    reverse=True,
+                )
+                labels = ["[Full]:", "[Partial]:", "[Minimal]:"]
+                for match, label in zip(scored, labels):
+                    desc = desc.replace(match.group(), label, 1)
+                criterion["description"] = desc
+            elif len(matches) == 2:
+                scored = sorted(
+                    matches,
+                    key=lambda m: int(_re.search(r"\d+", m.group()).group()),
+                    reverse=True,
+                )
+                for match, label in zip(scored, ["[Full]:", "[Minimal]:"]):
+                    desc = desc.replace(match.group(), label, 1)
+                criterion["description"] = desc
+        return json.dumps(obj, indent=2, ensure_ascii=False)
+    except Exception:
+        return rubric_json_str  # If anything fails, return unchanged
 
 
 def format_rubric_to_json(rubric_text: str) -> str:
@@ -248,7 +289,8 @@ def format_rubric_to_json(rubric_text: str) -> str:
         _parse_rubric_json(raw)
         return raw
 
-    return retry_api_call(_call)
+    result = retry_api_call(_call)
+    return _strip_marks_from_bands(result)
 
 
 def save_rubric(rubric: str, base_dir: str = ".") -> None:

@@ -21,7 +21,7 @@ from utils.retry import retry_api_call
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".py", ".cpp", ".ipynb"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".py", ".cpp", ".ipynb", ".md"}
 MAX_FILE_SIZE_MB = 20  # Files larger than this are skipped — LLM context would overflow
 
 _VISION_PROMPT = (
@@ -190,6 +190,7 @@ _READERS = {
     ".py":    read_text_file,
     ".cpp":   read_text_file,
     ".ipynb": read_notebook,
+    ".md":    read_text_file,
 }
 
 

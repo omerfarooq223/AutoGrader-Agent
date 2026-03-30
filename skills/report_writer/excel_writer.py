@@ -172,7 +172,9 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict]) -> None:
     categories = _collect_all_categories(results)
 
     # Build headers — no brackets on category names, no Feedback column
-    rubric_total = TOTAL_MARKS if TOTAL_MARKS and TOTAL_MARKS > 0 else "?"
+    # Derive total from max observed score — accurate regardless of config TOTAL_MARKS
+    numeric_marks = [r.get("marks") for r in results if isinstance(r.get("marks"), (int, float))]
+    rubric_total = int(max(numeric_marks)) if numeric_marks else (TOTAL_MARKS if TOTAL_MARKS else "?")
     headers = ["Name", "ID", f"Marks (/ {rubric_total})"]
     headers += [_clean_category_name(c) for c in categories]
     headers += ["Deductions / Reason", "Plagiarism Flag"]   # Feedback removed
@@ -211,8 +213,12 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict]) -> None:
             ws.cell(row=row_idx, column=col, value=value)
             col += 1
 
-        # Deductions
-        ws.cell(row=row_idx, column=col, value=entry.get("deductions", ""))
+        # Deductions — strip internal system notes before displaying
+        raw_deductions = entry.get("deductions", "") or ""
+        clean_deductions = re.sub(
+            r"\s*\[Score (capped|adjusted)[^\]]*\]", "", raw_deductions
+        ).strip()
+        ws.cell(row=row_idx, column=col, value=clean_deductions)
         col += 1
 
         # Plagiarism flag — shortened
@@ -252,7 +258,7 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict]) -> tuple:
 
     if marks:
         # Pass threshold as 50% of actual rubric total — not the raw config value
-        rubric_total  = TOTAL_MARKS if TOTAL_MARKS and TOTAL_MARKS > 0 else max(marks)
+        rubric_total  = int(max(marks))  # Derive from data — accurate regardless of config
         pass_mark     = round(rubric_total * 0.5)
         passed        = sum(1 for m in marks if m >= pass_mark)
         stats_data += [

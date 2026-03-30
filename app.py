@@ -17,6 +17,7 @@ import config
 from skills.file_extractor.extractor import extract_and_collect, read_file
 from skills.rubric_generator.rubric_agent import generate_rubric
 from skills.grader.grader_agent import grade_all
+from utils.cache import load_cache, save_cache, clear_cache
 from skills.plagiarism_detector.plagiarism_agent import check_plagiarism, apply_flags
 from skills.report_writer.excel_writer import write_results, shorten_plagiarism_flag
 
@@ -435,17 +436,37 @@ if zip_file and brief_file:
             )
 
             if st.session_state.rubric_manual_text.strip():
-                # Formatting
-                if not st.session_state.rubric_refined:
-                    if st.button("Format as JSON / Table", help="Converts your raw text into a structured table without changing the wording."):
-                        from skills.rubric_generator.rubric_agent import format_rubric_to_json
-                        with st.spinner("Formatting rubric…"):
-                            st.session_state.rubric_refined_text = format_rubric_to_json(
-                                st.session_state.rubric_manual_text
-                            )
-                        st.session_state.rubric_refined = True
-                        st.session_state.rubric_refine_view = True
-                        st.rerun()
+                # Live preview — parse JSON silently, no LLM call needed
+                _preview_text = st.session_state.rubric_manual_text.strip()
+                try:
+                    _preview_obj = json.loads(_preview_text)
+                    _criteria = _preview_obj.get("criteria", [])
+                    if _criteria:
+                        st.markdown("**Live Preview** — rubric looks valid ✓")
+                        _rubric_md = "| Criterion | Max Score | Description |\n|---|---|---|\n"
+                        for _c in _criteria:
+                            _name = _c.get("name", "")
+                            _score = _c.get("max_score", "")
+                            _desc = _c.get("description", "")
+                            _rubric_md += f"| {_name} | {_score} | {_desc} |\n"
+                        st.markdown(_rubric_md)
+                        _total = sum(_c.get("max_score", 0) for _c in _criteria if isinstance(_c.get("max_score"), (int, float)))
+                        st.caption(f"Total marks: {_total} across {len(_criteria)} criterion/criteria")
+                    else:
+                        st.caption("JSON parsed but no criteria found — check structure.")
+                except json.JSONDecodeError:
+                    # Not valid JSON yet — show Format button as fallback
+                    st.caption("Not valid JSON yet — paste JSON directly or use Format button below.")
+                    if not st.session_state.rubric_refined:
+                        if st.button("Format as JSON / Table", help="Converts your raw text into a structured table without changing the wording."):
+                            from skills.rubric_generator.rubric_agent import format_rubric_to_json
+                            with st.spinner("Formatting rubric…"):
+                                st.session_state.rubric_refined_text = format_rubric_to_json(
+                                    st.session_state.rubric_manual_text
+                                )
+                            st.session_state.rubric_refined = True
+                            st.session_state.rubric_refine_view = True
+                            st.rerun()
 
                 if st.session_state.rubric_refined and st.session_state.rubric_refine_view:
                     st.markdown("#### Compare Rubric Versions")
@@ -537,14 +558,54 @@ if zip_file and brief_file:
             try:
                 rubric_obj = json.loads(st.session_state.rubric)
                 if isinstance(rubric_obj, dict) and "criteria" in rubric_obj:
-                    rubric_md = "| Criterion | Max Score | Description |\n|---|---|---|\n"
-                    for c in rubric_obj["criteria"]:
-                        rubric_md += (
-                            f"| {c.get('name','')} "
-                            f"| {c.get('max_score','')} "
-                            f"| {c.get('description','')} |\n"
+                    import re as _re
+                    def _split_bands(desc: str, max_score) -> tuple:
+                        """Extract full/partial/minimal bands from description string."""
+                        # Find all [N Marks]: text patterns
+                        parts = _re.split(r'\[\d+\s*Marks?\]:', desc, flags=_re.IGNORECASE)
+                        labels = _re.findall(r'\[(\d+)\s*Marks?\]:', desc, flags=_re.IGNORECASE)
+                        if len(parts) >= 4:  # leading empty + 3 sections
+                            full    = parts[1].strip()
+                            partial = parts[2].strip()
+                            minimal = parts[3].strip()
+                            return full, partial, minimal
+                        return desc, "", ""
+
+                    # Build header using actual score values from rubric
+                    criteria = rubric_obj.get("criteria", [])
+                    # Check if any criterion has band descriptions
+                    has_bands = any(
+                        _re.search(r'\[\d+\s*Marks?\]', c.get("description",""), _re.IGNORECASE)
+                        for c in criteria
+                    )
+                    if has_bands:
+                        rows = []
+                        for c in criteria:
+                            full, partial, minimal = _split_bands(
+                                c.get("description",""), c.get("max_score","")
+                            )
+                            rows.append({
+                                "Criterion":       c.get("name",""),
+                                "Max Score":       c.get("max_score",""),
+                                "Full Marks":      full,
+                                "Partial Marks":   partial,
+                                "Minimal / Zero":  minimal,
+                            })
+                        import pandas as pd
+                        st.dataframe(
+                            pd.DataFrame(rows),
+                            use_container_width=True,
+                            hide_index=True,
                         )
-                    st.markdown(rubric_md)
+                    else:
+                        rubric_md = "| Criterion | Max Score | Description |\n|---|---|---|\n"
+                        for c in criteria:
+                            rubric_md += (
+                                f"| {c.get('name','')} "
+                                f"| {c.get('max_score','')} "
+                                f"| {c.get('description','')} |\n"
+                            )
+                        st.markdown(rubric_md)
                 else:
                     st.markdown(st.session_state.rubric)
             except Exception:
@@ -594,8 +655,8 @@ if st.session_state.rubric_approved:
                 key="answer_key_manual_textarea",
             )
             uploaded_ak = st.file_uploader(
-                "Or upload answer key file (PDF, DOCX, PY, CPP, IPYNB):",
-                type=["pdf", "docx", "py", "cpp", "ipynb"],
+                "Or upload answer key file (PDF, DOCX, PY, CPP, IPYNB, MD):",
+                type=["pdf", "docx", "py", "cpp", "ipynb", "md"],
                 key="answer_key_file_uploader",
             )
             if uploaded_ak:
@@ -605,14 +666,17 @@ if st.session_state.rubric_approved:
                 tmp_path = _save_temp(uploaded_ak, suffix)
                 try:
                     st.session_state.answer_key_final = read_file(tmp_path)
-                except Exception:
-                    st.session_state.answer_key_final = f"[File uploaded: {uploaded_ak.name}]"
+                    # Clear manual text so it never overrides the uploaded file on rerun
+                    st.session_state.answer_key_manual_text = ""
+                except Exception as _e:
+                    st.error(f"Could not read answer key file: {_e}")
+                    st.session_state.answer_key_final = None
                 finally:
                     os.unlink(tmp_path)
             elif st.session_state.answer_key_manual_text.strip():
                 st.session_state.answer_key_final = st.session_state.answer_key_manual_text
-            else:
-                st.session_state.answer_key_final = None
+            # IMPORTANT: do NOT reset answer_key_final here
+            # This block reruns on every Streamlit interaction
 
         else:
             if st.button("Generate answer key from brief", key="generate_auto_answer_key"):
@@ -701,6 +765,11 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
     if start_btn:
         st.session_state.grading_in_progress = True
         tmp_zip = _save_temp(zip_file, ".zip")
+        # Persistent session directory — survives between runs for cache resume
+        zip_stem = Path(tmp_zip).stem
+        session_dir = str(Path(tmp_zip).parent / f".autograder_{zip_stem}")
+        Path(session_dir).mkdir(exist_ok=True)
+
         try:
             with st.spinner("Extracting submissions…"):
                 exclude = []
@@ -708,13 +777,21 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                     exclude.append(st.session_state.answer_key_uploaded_filename)
                 submissions, extract_dir = extract_and_collect(tmp_zip, exclude_filenames=exclude)
                 # Remove any submission whose extracted name matches the answer key author
-                # This catches cases where the answer key file was accidentally left in the ZIP
                 if st.session_state.get("answer_key_uploaded_filename"):
                     ak_stem = Path(st.session_state.answer_key_uploaded_filename).stem.lower()
                     before = len(submissions)
                     submissions = [s for s in submissions if ak_stem not in s["filename"].lower()]
                     if len(submissions) < before:
                         st.warning(f"Excluded {before - len(submissions)} file(s) matching answer key name from grading.")
+
+            # Load cache from persistent session dir — resumes grading after crash or restart
+            cached = load_cache(session_dir)
+            cached_count = sum(
+                1 for s in submissions
+                if s.get("cache_key", s["filename"]) in cached
+            )
+            if cached_count:
+                st.info(f"Resuming: {cached_count}/{len(submissions)} already graded from previous session.")
 
             if not submissions:
                 _status("No supported files found in the ZIP archive.", "error")
@@ -740,10 +817,15 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                     score = _result.get("marks", "Error")
                     logs.append(f"✓ {filename} — Score: {score}")
                     log_area.code("\n".join(logs[-10:]), language="text")  # type: ignore
+                    # Save to persistent session_dir so cache survives between runs
+                    key = _result.get("cache_key", filename)
+                    cached[key] = _result
+                    save_cache(session_dir, cached)
 
             results = grade_all(
                 st.session_state.rubric,
                 submissions,
+                cached=cached,
                 on_complete=_on_complete,
                 answer_key=st.session_state.answer_key_final,
             )
@@ -757,6 +839,7 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                 report_path = tmp_xl.name
             # Save report immediately — don't block on LLM insights call
             write_results(results, report_path, return_insights=False)
+            clear_cache(session_dir)  # Clear only after report successfully written
             # Generate insights in background so UI stays responsive
             def _gen_insights():
                 try:
@@ -796,7 +879,8 @@ if st.session_state.results is not None:
     numeric = [r["marks"] for r in results if isinstance(r.get("marks"), (int, float))]
     if numeric:
         flagged = sum(1 for r in results if r.get("plagiarism_flag"))
-        passed  = sum(1 for m in numeric if m >= config.PASS_THRESHOLD)
+        pass_mark = round(max(numeric) * 0.5)  # 50% of rubric total
+        passed  = sum(1 for m in numeric if m >= pass_mark)
         avg     = sum(numeric) / len(numeric)
         m1, m2, m3, m4 = st.columns(4)
         with m1:
@@ -805,7 +889,7 @@ if st.session_state.results is not None:
             st.markdown(_metric(f"{avg:.1f}", "Average"), unsafe_allow_html=True)
         with m3:
             st.markdown(
-                _metric(f"{passed / len(numeric) * 100:.0f}%", "Pass Rate"),
+                _metric(f"{passed / len(numeric) * 100:.0f}%" if numeric else "N/A", "Pass Rate"),
                 unsafe_allow_html=True,
             )
         with m4:
@@ -830,6 +914,12 @@ if st.session_state.results is not None:
     table_cols = [c for c in cols if c in df.columns]
     if "plagiarism_flag" in table_cols:
         df["plagiarism_flag"] = df["plagiarism_flag"].apply(shorten_plagiarism_flag)
+    # Coerce all numeric columns — error submissions leave empty strings
+    # which crash PyArrow when it tries to infer column types
+    for _col in df.columns:
+        if _col not in ("name", "id", "filename", "cache_key", "deductions", "plagiarism_flag", "feedback"):
+            df[_col] = pd.to_numeric(df[_col], errors="coerce")
+
     with st.expander("View detailed grading table", expanded=True):
         st.dataframe(df[table_cols], use_container_width=True, hide_index=True)
 

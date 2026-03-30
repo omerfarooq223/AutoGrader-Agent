@@ -30,6 +30,7 @@ def _call_groq(system_prompt: str, user_prompt: str, model: str, max_tokens: int
         ],
         temperature=0.2,
         max_tokens=max_tokens,
+        timeout=30.0,  # Hard 30s timeout — prevents infinite hangs on large submissions
     )
     return response.choices[0].message.content.strip()
 

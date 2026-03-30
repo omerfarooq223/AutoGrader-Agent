@@ -96,19 +96,36 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None) -> dict:
     try:
         result = json.loads(text)
     except json.JSONDecodeError:
-        return {
-            "name":             "NOT FOUND",
-            "id":               "NOT FOUND",
-            "marks":            "Error",
-            "deductions":       f"Could not parse LLM response: {raw[:300]}",
-            "category_scores":  {},
-            "feedback":         "",
-        }
+        # Try brace-matching to extract partial JSON before giving up
+        start = text.find("{")
+        recovered = None
+        if start != -1:
+            depth, end = 0, start
+            for i, ch in enumerate(text[start:], start):
+                if ch == "{": depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            try:
+                recovered = json.loads(text[start:end + 1])
+            except Exception:
+                pass
+        if recovered is None:
+            return {
+                "name":            fallback_name,
+                "id":              fallback_name,
+                "marks":           "Error",
+                "deductions":      f"Could not parse LLM response: {raw[:300]}",
+                "category_scores": {},
+                "feedback":        "",
+            }
+        result = recovered
 
-    # Clean name — remove filename artifacts
-    result["name"] = _clean_name(
-        result.get("name", ""), fallback_name
-    )
+    # Clean name — use filename as fallback if name not found in submission
+    cleaned_name = _clean_name(result.get("name", ""), fallback_name)
+    result["name"] = cleaned_name if cleaned_name != "NOT FOUND" else fallback_name
 
     # Normalize deductions — LLM sometimes returns a list instead of a string
     deductions = result.get("deductions", "")
@@ -117,12 +134,67 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None) -> dict:
     elif deductions is None:
         result["deductions"] = ""
 
-    # Clean ID — if it looks like a filename or is empty, mark as NOT FOUND
+    # Clean ID — use filename as fallback if ID not found in submission
     raw_id = str(result.get("id", "")).strip()
     if not raw_id or raw_id.lower() in ("n/a", "not found", "none", ""):
-        result["id"] = "NOT FOUND"
+        result["id"] = fallback_name
     else:
         result["id"] = raw_id
+
+    # ── Post-process: apply deductions written in text to actual scores ──
+    # The LLM often writes "CriterionName: reason (-N)" but forgets to subtract.
+    # Parse deduction text and enforce it against category_scores non-LLM style.
+    deduction_text = result.get("deductions", "") or ""
+    cat_scores_raw = result.get("category_scores", {})
+    if deduction_text and cat_scores_raw and isinstance(cat_scores_raw, dict):
+        import re as _re
+        # Match patterns like "Mutual Exclusion: some reason (-3)"
+        # or "Deadlock Detection: explanation (-1)"
+        deduction_pattern = _re.compile(
+            r'([A-Za-z][A-Za-z\s]+?):\s+[^(]*\(-\s*(\d+(?:\.\d+)?)\)',
+            _re.IGNORECASE
+        )
+        # Accumulate total deductions per criterion name
+        criterion_deductions: dict[str, float] = {}
+        for match in deduction_pattern.finditer(deduction_text):
+            crit_raw = match.group(1).strip()
+            amount   = float(match.group(2))
+            # Find closest matching key in category_scores
+            matched_key = None
+            for k in cat_scores_raw:
+                if crit_raw.lower() in k.lower() or k.lower() in crit_raw.lower():
+                    matched_key = k
+                    break
+            if matched_key:
+                criterion_deductions[matched_key] = (
+                    criterion_deductions.get(matched_key, 0) + amount
+                )
+        # Apply deductions to category scores
+        if criterion_deductions:
+            rubric_maxes: dict[str, float] = {}
+            if rubric:
+                try:
+                    import json as _j
+                    robj = _j.loads(rubric) if isinstance(rubric, str) else rubric
+                    for c in robj.get("criteria", []):
+                        rubric_maxes[c["name"]] = float(c.get("max_score", 100))
+                except Exception:
+                    pass
+            adjusted = False
+            for k, deduct in criterion_deductions.items():
+                if k in cat_scores_raw and isinstance(cat_scores_raw[k], (int, float)):
+                    cap = rubric_maxes.get(k, 100)
+                    new_score = max(0.0, min(cap, float(cat_scores_raw[k]) - deduct))
+                    if new_score != cat_scores_raw[k]:
+                        cat_scores_raw[k] = new_score
+                        adjusted = True
+            if adjusted:
+                result["category_scores"] = cat_scores_raw
+                new_total = sum(
+                    v for v in cat_scores_raw.values()
+                    if isinstance(v, (int, float))
+                )
+                result["marks"] = new_total
 
     # Validate: cap individual scores to their max_score, then fix total
     cat_scores = result.get("category_scores", {})
@@ -178,21 +250,34 @@ SYSTEM_PROMPT = (
     "2. Extract the student ID. Look for patterns like 'ID:', 'Roll No:', "
     "'Registration:', or alphanumeric codes like 'F2021-CS-045'. "
     "If not found, return 'NOT FOUND'. Do NOT guess or invent an ID.\n"
-    "3. Score the submission on EACH criterion. Score must be 0 to max_score.\n"
+    "3. Score EACH criterion from 0 to its max_score. "
+    "NEVER exceed max_score for any criterion. "
+    "If work is flawed, deduct from the score — do NOT give max_score and then "
+    "list deductions separately. The score IS the verdict.\n"
     "4. Sum criterion scores to get total marks.\n"
-    "5. List mark deductions with specific reasons.\n\n"
-    "Respond ONLY with valid JSON — no markdown, no extra text:\n"
+    "5. For each mark deducted, write ONE line in this exact format: "
+    "'CriterionName: reason in 4-6 words (-N marks)'. "
+    "Example: 'Deadlock Detection: vague RAG explanation (-1)'. "
+    "If no marks deducted anywhere, write 'No deductions.' "
+    "Never write paragraphs. Never explain what was correct.\n\n"
+    "For EACH criterion, before scoring ask yourself: does this submission "
+    "FULLY satisfy every requirement for the highest band? If there is ANY "
+    "error, vagueness, or omission — even minor — you MUST deduct at least 1 mark. "
+    "A score of max_score means the work is flawless for that criterion.\n\n"
+    "Respond ONLY with this exact JSON — no markdown, no extra fields:\n"
     "{\n"
     '  "name": "<student full name or NOT FOUND>",\n'
     '  "id": "<student ID or NOT FOUND>",\n'
     '  "marks": <total — must equal sum of category_scores>,\n'
     '  "category_scores": {"Criterion Name": <score>, ...},\n'
-    '  "deductions": "...",\n'
-    '  "feedback": "..."\n'
+    '  "deductions": "<list only actual deductions, or No deductions.>"\n'
     "}\n\n"
-    "CRITICAL: 'name' must be ONLY the student's name — never a filename, "
-    "never an ID, never a path. "
-    "'marks' must equal the exact sum of all values in 'category_scores'."
+    "CRITICAL RULES:\n"
+    "- 'name' must be ONLY the student name — never a filename, ID, or path.\n"
+    "- Each category score must be between 0 and its max_score. Never exceed max_score.\n"
+    "- 'marks' must equal the exact sum of all category_scores.\n"
+    "- Do NOT include a 'feedback' field or any field not listed above.\n"
+    "- If score is max_score for a criterion, deductions for it must be empty."
 )
 
 
@@ -207,7 +292,30 @@ def grade_submission(
     Grade a single student submission with retry logic.
     If answer_key is provided, the LLM compares the submission to it.
     """
+    # Build allowed scores note from rubric bands — forces discrete grading
+    def _build_allowed_scores(rubric_str: str) -> str:
+        try:
+            import json as _j, re as _r
+            obj = _j.loads(rubric_str)
+            lines = ["ALLOWED SCORES PER CRITERION (pick ONLY one of these exact values):"]
+            for c in obj.get("criteria", []):
+                name  = c.get("name", "")
+                max_s = int(c.get("max_score", 0))
+                desc  = c.get("description", "")
+                nums  = sorted(set(
+                    [int(x) for x in _r.findall(r"\[(\d+)\s*[Mm]arks?\]", desc)] + [0]
+                ), reverse=True)
+                if not nums or nums == [0]:
+                    nums = list(range(max_s, -1, -1))
+                lines.append(f"  {name}: {nums}")
+            return "\n".join(lines)
+        except Exception:
+            return ""
+
+    allowed_scores_note = _build_allowed_scores(rubric)
+
     if answer_key:
+        logger.warning("DEBUG: Answer key present — length %d chars", len(answer_key))
         rubric_text = _trim_text(rubric, MAX_RUBRIC_CHARS, "Rubric")
         answer_key_text = _trim_text(answer_key, MAX_ANSWER_KEY_CHARS, "Answer key")
         submission_for_llm = _trim_text(submission_text, MAX_SUBMISSION_CHARS, "Submission")
@@ -215,6 +323,7 @@ def grade_submission(
             "Compare this student submission to the provided answer key "
             "and grade using the rubric.\n\n"
             f"Grading Rubric:\n{rubric_text}\n\n"
+            f"{allowed_scores_note}\n\n"
             f"Answer Key / Model Solution:\n{answer_key_text}\n\n"
             f"Submission Filename: {filename}\n\n"
             f"Submission Content:\n{submission_for_llm}"
@@ -225,9 +334,22 @@ def grade_submission(
         prompt = (
             "Grade this student submission using the rubric only.\n\n"
             f"Grading Rubric:\n{rubric_text}\n\n"
+            f"{allowed_scores_note}\n\n"
             f"Submission Filename: {filename}\n\n"
             f"Submission Content:\n{submission_for_llm}"
         )
+
+    # Guard: if submission is empty (e.g. scanned PDF with no text layer),
+    # return a clean error instead of sending empty content to LLM
+    if not submission_for_llm or len(submission_for_llm.strip()) < 50:
+        return {
+            "name":            filename,
+            "id":              filename,
+            "marks":           "Error",
+            "category_scores": {},
+            "deductions":      "[No readable text found — likely a scanned image. Enable EXTRACT_IMAGES=True or convert to searchable PDF.]",
+            "feedback":        "",
+        }
 
     raw = retry_api_call(
         _call_llm,
@@ -293,10 +415,10 @@ def grade_all(
         # For long assignments (5+ pages), we increase the delay to 40s to ensure 
         # the Token-Per-Minute quota replenishes fully.
         # llama-3.1-8b-instant has ~5x higher TPM than 70B — shorter sleep is safe
-        base_sleep = 8.0
-        if len(sub["content"]) > 8000:
-            base_sleep = 15.0
-            logger.info("Large submission detected (>8k chars). Sleeping 15s for quota recovery.")
+        base_sleep = 30.0
+        if len(sub["content"]) > 5000:
+            base_sleep = 60.0
+            logger.info("Large submission detected (>5k chars). Sleeping 60s for quota recovery.")
         
         time.sleep(base_sleep)
         
