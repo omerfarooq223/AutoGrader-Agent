@@ -47,7 +47,7 @@ def _ngram_jaccard(text_a: str, text_b: str, n: int = 4) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
-def check_plagiarism(submissions: list[dict]) -> dict[str, list[str]]:
+def check_plagiarism(submissions: list[dict], results: list[dict] | None = None) -> dict[str, list[str]]:
     """
     Compare all submission pairs using a combined similarity score:
       combined = 0.6 * cosine_similarity + 0.4 * ngram_jaccard
@@ -56,6 +56,8 @@ def check_plagiarism(submissions: list[dict]) -> dict[str, list[str]]:
     ----------
     submissions : list[dict]
         Each dict must have keys: filename, content, and optionally cache_key.
+    results : list[dict] | None
+        Optional. The graded results list containing the 'name' field for each student.
 
     Returns
     -------
@@ -82,7 +84,25 @@ def check_plagiarism(submissions: list[dict]) -> dict[str, list[str]]:
 
     # Use cache_key as the stable identifier — handles duplicate filenames
     keys     = [s.get("cache_key", s["filename"]) for s in gradeable]
-    names    = [s["filename"] for s in gradeable]
+    
+    # Map cache_key and filename to student name
+    name_map = {}
+    if results:
+        for r in results:
+            student_name = r.get("name")
+            if student_name and student_name != "NOT FOUND":
+                if r.get("cache_key"):
+                    name_map[r.get("cache_key")] = student_name
+                if r.get("filename"):
+                    name_map[r.get("filename")] = student_name
+
+    names = []
+    for s in gradeable:
+        k = s.get("cache_key", s["filename"])
+        fname = s["filename"]
+        student_name = name_map.get(k) or name_map.get(fname) or fname
+        names.append(student_name)
+        
     contents = [s["content"] for s in gradeable]
 
     # TF-IDF cosine similarity matrix

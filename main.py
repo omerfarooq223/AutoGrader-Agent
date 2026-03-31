@@ -169,7 +169,7 @@ def main() -> None:
         # ── 6. Plagiarism detection ─────────────────────────────
         console.rule("[bold blue]Step 6: Plagiarism Check")
         with console.status("Analyzing similarity…"):
-            flags = check_plagiarism(submissions)
+            flags = check_plagiarism(submissions, results)
         results = apply_flags(results, flags)
 
         flagged = sum(1 for r in results if r.get("plagiarism_flag"))

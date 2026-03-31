@@ -830,7 +830,7 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
             progress.progress(1.0, text="Grading complete.")
 
             with st.spinner("Running plagiarism check…"):
-                flags = check_plagiarism(submissions)
+                flags = check_plagiarism(submissions, results)
                 results = apply_flags(results, flags)
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xl:

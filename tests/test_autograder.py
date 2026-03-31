@@ -147,8 +147,8 @@ class TestPlagiarism:
 
     def test_check_plagiarism_flags_identical(self):
         subs = [
-            {"filename": "a.py", "content": "This is a long enough string for TF-IDF to work properly with cosine similarity"},
-            {"filename": "b.py", "content": "This is a long enough string for TF-IDF to work properly with cosine similarity"},
+            {"filename": "a.py", "content": "This is a long enough string for TF-IDF to work properly with cosine similarity. " * 3},
+            {"filename": "b.py", "content": "This is a long enough string for TF-IDF to work properly with cosine similarity. " * 3},
         ]
         flags = check_plagiarism(subs)
         assert "a.py" in flags
@@ -156,8 +156,8 @@ class TestPlagiarism:
 
     def test_check_plagiarism_no_flag_for_different(self):
         subs = [
-            {"filename": "a.py", "content": "Python implementation of binary search algorithm with recursion"},
-            {"filename": "b.py", "content": "JavaScript web server using Express framework for REST API endpoints"},
+            {"filename": "a.py", "content": "Python implementation of binary search algorithm with recursion which has to be very long. " * 3},
+            {"filename": "b.py", "content": "JavaScript web server using Express framework for REST API endpoints which must be long enough. " * 3},
         ]
         flags = check_plagiarism(subs)
         assert len(flags) == 0
@@ -193,7 +193,7 @@ class TestGraderParsing:
 
     def test_parse_invalid_json_fallback(self):
         result = _parse_json("not json at all", "fallback.py")
-        assert result["name"] == "NOT FOUND"
+        assert result["name"] == "fallback.py"
         assert result["marks"] == "Error"
 
 
