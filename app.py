@@ -22,7 +22,7 @@ from skills.plagiarism_detector.plagiarism_agent import check_plagiarism, apply_
 from skills.report_writer.excel_writer import write_results, shorten_plagiarism_flag
 
 # ── Page config (must be first Streamlit call) ──────────────────
-st.set_page_config(page_title="AutoGrader", page_icon="📝", layout="wide")
+st.set_page_config(page_title="AutoGrader", page_icon="📝", layout="wide", initial_sidebar_state="expanded")
 
 # ── Session state defaults ──────────────────────────────────────
 _DEFAULTS = {
@@ -61,18 +61,18 @@ st.markdown(
 
 st.markdown("""<style>
 html, body, [class*="st-"], .stMarkdown, .stTextArea textarea,
-input, button, select, .stExpander, p, h1, h2, h3, h4, span, div {
+input, button, select, .stExpander, p, h1, h2, h3, h4 {
     font-family: 'Inter', sans-serif !important;
 }
-#MainMenu, footer, header {visibility: hidden;}
+#MainMenu, footer {visibility: hidden;}
 .ag-header {
     background: #0f172a;
     margin: -6rem -4rem 0 -4rem;
-    padding: 2.8rem 4rem 2.2rem 4rem;
+    padding: 2.2rem 4rem 1.8rem 4rem;
 }
 .ag-header h1 {
     color: #ffffff;
-    font-size: 1.9rem;
+    font-size: 2.2rem;
     font-weight: 800;
     margin: 0;
     letter-spacing: -0.3px;
@@ -85,31 +85,19 @@ input, button, select, .stExpander, p, h1, h2, h3, h4, span, div {
     margin-top: 0.65rem;
 }
 .ag-header p {
-    color: #94a3b8;
-    font-size: 0.88rem;
+    color: #cbd5e1;
+    font-size: 0.92rem;
     margin: 0.55rem 0 0 0;
     font-weight: 400;
 }
 .step-section {
     position: relative;
-    padding: 2rem 0 0.5rem 0;
-}
-.step-watermark {
-    position: absolute;
-    top: 0.2rem;
-    left: -0.15rem;
-    font-size: 5rem;
-    font-weight: 800;
-    color: #e2e8f0;
-    line-height: 1;
-    user-select: none;
-    pointer-events: none;
-    z-index: 0;
+    padding: 1rem 0 0.25rem 0;
 }
 .step-content {
     position: relative;
     z-index: 1;
-    padding-left: 3.6rem;
+    padding-left: 0;
 }
 .step-content h3 {
     font-size: 1.15rem;
@@ -125,7 +113,7 @@ input, button, select, .stExpander, p, h1, h2, h3, h4, span, div {
 .step-divider {
     border: none;
     border-top: 1px solid #e2e8f0;
-    margin: 1.5rem 0 0 0;
+    margin: 0.75rem 0 0 0;
 }
 [data-testid="stFileUploader"] section {
     background: #ffffff;
@@ -140,6 +128,7 @@ input, button, select, .stExpander, p, h1, h2, h3, h4, span, div {
     font-size: 0.85rem;
     font-weight: 500;
     margin: 0.5rem 0;
+    margin-bottom: 0.75rem;
     background: transparent;
 }
 .status-info    { border-left: 3px solid #3b82f6; color: #334155; }
@@ -239,50 +228,7 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(2) .stButton > button[kind=
     box-shadow: none;
 }
 
-/* ── Stepper ────────────────────────────────────────────────── */
-.ag-stepper {
-    display: flex;
-    gap: 12px;
-    margin: 1rem 0 1.2rem 0;
-    flex-wrap: wrap;
-}
-.ag-step {
-    flex: 1;
-    min-width: 160px;
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
-    padding: 0.65rem 0.85rem;
-    position: relative;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.03);
-}
-.ag-step .k {
-    font-size: 0.7rem;
-    color: #64748b;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.35px;
-}
-.ag-step .v {
-    font-size: 0.95rem;
-    font-weight: 800;
-    color: #0f172a;
-    margin-top: 0.25rem;
-}
-.ag-step .pill {
-    position: absolute;
-    top: 10px;
-    right: 12px;
-    font-size: 0.7rem;
-    padding: 0.18rem 0.55rem;
-    border-radius: 999px;
-    font-weight: 800;
-}
-.ag-step.done { border-color: #22c55e; }
-.ag-step.done .pill { background: #dcfce7; color: #166534; }
-.ag-step.active { border-color: #3b82f6; }
-.ag-step.active .pill { background: #dbeafe; color: #1d4ed8; }
-.ag-step.todo .pill { background: #f1f5f9; color: #475569; }
+/* Horizontal stepper removed */
 </style>""", unsafe_allow_html=True)
 
 # ── Header ──────────────────────────────────────────────────────
@@ -299,7 +245,6 @@ st.write("")
 def _step(number: int, title: str, subtitle: str):
     st.markdown(f"""
     <div class="step-section">
-        <span class="step-watermark">{number}</span>
         <div class="step-content">
             <h3>{title}</h3>
             <p class="step-desc">{subtitle}</p>
@@ -374,20 +319,132 @@ steps = [
     (4, "Grade", st.session_state.results is not None),
     (5, "Results", st.session_state.results is not None),
 ]
-stepper_html = '<div class="ag-stepper">'
-for idx, title, done in steps:
-    status = "done" if done else "active" if idx == active_step else "todo"
-    pill = "Done" if done else "In progress" if idx == active_step else "To do"
-    stepper_html += (
-        f'<div class="ag-step {status}">'
-        f'<div class="k">Step {idx}</div>'
-        f'<div class="v">{title}</div>'
-        f'<div class="pill">{pill}</div>'
-        f'</div>'
-    )
-stepper_html += "</div>"
-st.markdown(stepper_html, unsafe_allow_html=True)
-_divider()
+# Horizontal stepper removed — replaced by sidebar vertical stepper below
+
+# ── Sidebar vertical stepper ────────────────────────────────────
+with st.sidebar:
+
+    st.markdown("""
+    <style>
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0f172a 0%, #111827 60%, #0d1f35 100%) !important;
+        min-width: 200px !important;
+        max-width: 200px !important;
+    }
+    .vstp-title {
+        color: #94a3b8;
+        font-size: 0.65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        padding: 1.4rem 1.2rem 0.8rem 1.2rem;
+        margin: 0;
+    }
+    .vstp {
+        display: flex;
+        align-items: flex-start;
+        padding: 0.25rem 1.2rem;
+        position: relative;
+        gap: 0.75rem;
+    }
+    .vstp-line {
+        position: absolute;
+        left: 1.85rem;
+        top: 1.8rem;
+        bottom: -0.5rem;
+        width: 2px;
+        background: #1e293b;
+        z-index: 0;
+    }
+    .vstp-dot {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.7rem;
+        font-weight: 800;
+        z-index: 1;
+        margin-top: 0.1rem;
+    }
+    .vstp-dot.done   { background: #22c55e; color: #fff; }
+    .vstp-dot.active { background: #3b82f6; color: #fff; box-shadow: 0 0 0 3px rgba(59,130,246,0.25); }
+    .vstp-dot.todo   { background: #1e293b; color: #475569; border: 2px solid #334155; }
+    .vstp-info { flex: 1; }
+    .vstp-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin: 0;
+        line-height: 1.3;
+    }
+    .vstp-label.done   { color: #86efac; }
+    .vstp-label.active { color: #ffffff; }
+    .vstp-label.todo   { color: #3d5068; }
+    .vstp-status {
+        font-size: 0.6rem;
+        font-weight: 600;
+        margin: 0.1rem 0 0 0;
+    }
+    .vstp-status.done   { color: #4ade80; }
+    .vstp-status.active { color: #93c5fd; }
+    .vstp-status.todo   { color: #334155; }
+    .vstp:last-child .vstp-line { display: none; }
+    .sidebar-footer {
+        margin-top: 3rem;
+        padding-bottom: 2rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid #1e293b;
+        text-align: center;
+    }
+    .sidebar-footer .built-by {
+        color: #64748b;
+        font-size: 0.6rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        margin: 0 0 0.25rem 0;
+    }
+    .sidebar-footer .author-name {
+        color: #f1f5f9;
+        font-size: 0.85rem;
+        font-weight: 800;
+        margin: 0;
+        letter-spacing: -0.2px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<p class="vstp-title">Progress</p>', unsafe_allow_html=True)
+
+    _step_defs = [
+        (1, "Upload Files",    upload_done),
+        (2, "Rubric",          st.session_state.rubric_approved),
+        (3, "Answer Key",      st.session_state.answer_key_approved),
+        (4, "Grade",           st.session_state.results is not None),
+        (5, "Results",         st.session_state.results is not None),
+    ]
+    _sidebar_html = ""
+    for _idx, _title, _done in _step_defs:
+        _is_active = (_idx == active_step)
+        _cls = "done" if _done else "active" if _is_active else "todo"
+        _icon = "✓" if _done else str(_idx)
+        _status_text = "Complete" if _done else "In progress" if _is_active else "Waiting"
+        _is_last = (_idx == len(_step_defs))
+        _sidebar_html += f"""<div class="vstp">
+{"" if _is_last else '<div class="vstp-line"></div>'}
+<div class="vstp-dot {_cls}">{_icon}</div>
+<div class="vstp-info">
+<p class="vstp-label {_cls}">{_title}</p>
+<p class="vstp-status {_cls}">{_status_text}</p>
+</div>
+</div>"""
+    st.markdown(_sidebar_html, unsafe_allow_html=True)
+    st.markdown("""<div class="sidebar-footer">
+<p class="built-by">Built by</p>
+<p class="author-name">Muhammad Umar Farooq</p>
+</div>""", unsafe_allow_html=True)
 
 # ── Step 1 — Upload Files ───────────────────────────────────────
 _step(1, "Upload Files", "Upload your submissions ZIP and assignment brief.")
@@ -592,7 +649,7 @@ if zip_file and brief_file:
                         import pandas as pd
                         st.dataframe(
                             pd.DataFrame(rows),
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
                     else:
@@ -613,7 +670,7 @@ if zip_file and brief_file:
                         import io
                         import pandas as pd
                         df = pd.read_csv(io.StringIO(text))
-                        st.dataframe(df, use_container_width=True, hide_index=True)
+                        st.dataframe(df, width="stretch", hide_index=True)
                     except Exception:
                         st.code(text, language="text")
                 else:
@@ -748,7 +805,7 @@ _step(4, "Grade Submissions", "Each submission is graded against the rubric and 
 if st.session_state.rubric_approved and st.session_state.answer_key_approved and zip_file and st.session_state.results is None:
     if st.session_state.grading_in_progress:
         # Show a cancel button while grading is happening
-        if st.button("Cancel Grading", type="secondary", use_container_width=True):
+        if st.button("Cancel Grading", type="secondary", width="stretch"):
             st.session_state.grading_in_progress = False
             st.rerun()
 
@@ -756,7 +813,7 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
     with c1:
         start_btn = st.button(
             "Start Grading",
-            use_container_width=True,
+            width="stretch",
             disabled=st.session_state.grading_in_progress,
         )
 
@@ -928,7 +985,7 @@ if st.session_state.results is not None:
             df[_col] = pd.to_numeric(df[_col], errors="coerce")
 
     with st.expander("View detailed grading table", expanded=True):
-        st.dataframe(df[table_cols], use_container_width=True, hide_index=True)
+        st.dataframe(df[table_cols], width="stretch", hide_index=True)
 
     st.write("")
     # Build filename from LMS metadata: "CC323 - Assignment 2 - F2025.xlsx"
@@ -945,21 +1002,17 @@ if st.session_state.results is not None:
         data=st.session_state.report_bytes,
         file_name=_dl_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        width="stretch",
     )
 
 # ── Reset ────────────────────────────────────────────────────────
 if st.session_state.rubric or st.session_state.results is not None:
     _divider()
     st.markdown('<div class="reset-btn">', unsafe_allow_html=True)
-    if st.button("Start Over", use_container_width=True):
+    if st.button("Start Over", width="stretch"):
         for key, val in _DEFAULTS.items():
             st.session_state[key] = val
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("---")
-st.markdown(
-    "<p style='text-align: center; color: #94a3b8; font-size: 0.8rem;'>Built by Muhammad Umar Farooq</p>",
-    unsafe_allow_html=True,
-)
+

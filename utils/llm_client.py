@@ -28,7 +28,7 @@ def _call_groq(system_prompt: str, user_prompt: str, model: str, max_tokens: int
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_prompt},
         ],
-        temperature=0.2,
+        temperature=0.0,
         max_tokens=max_tokens,
         timeout=30.0,  # Hard 30s timeout — prevents infinite hangs on large submissions
     )
@@ -70,7 +70,7 @@ def _call_gemini(
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             max_output_tokens=max_tokens,
-            temperature=0.2,
+            temperature=0.0,
         ),
     )
     return response.text.strip()

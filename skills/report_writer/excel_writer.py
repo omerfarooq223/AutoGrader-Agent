@@ -23,14 +23,21 @@ logger = logging.getLogger(__name__)
 
 # ── Styling constants ───────────────────────────────────────────
 _HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
-_HEADER_FILL = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-_PASS_FILL   = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-_FAIL_FILL   = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-_FLAG_FONT   = Font(color="FF0000", bold=True)
+_HEADER_FILL = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
+_SUBHEADER_FILL = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+_PASS_FILL   = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")
+_PASS_FONT   = Font(color="166534")
+_FAIL_FILL   = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+_FAIL_FONT   = Font(color="991B1B")
+
+_FLAG_FONT   = Font(color="DC2626", bold=True)
+_FLAG_FILL   = PatternFill(start_color="FEF2F2", end_color="FEF2F2", fill_type="solid")
+
 _THIN_BORDER = Border(
-    left=Side(style="thin"), right=Side(style="thin"),
-    top=Side(style="thin"),  bottom=Side(style="thin"),
+    left=Side(style="thin", color="CBD5E1"), right=Side(style="thin", color="CBD5E1"),
+    top=Side(style="thin", color="CBD5E1"),  bottom=Side(style="thin", color="CBD5E1"),
 )
+_ALT_ROW_FILL = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
 
 
 def _shorten_flag(flag: str) -> str:
@@ -175,6 +182,7 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict], sheet_title
     # Derive total from max observed score — accurate regardless of config TOTAL_MARKS
     numeric_marks = [r.get("marks") for r in results if isinstance(r.get("marks"), (int, float))]
     rubric_total = int(max(numeric_marks)) if numeric_marks else (TOTAL_MARKS if TOTAL_MARKS else "?")
+    pass_mark = round(rubric_total * (PASS_THRESHOLD / 100.0)) if isinstance(rubric_total, (int, float)) else 0
     headers = ["Name", "ID", f"Marks (/ {rubric_total})"]
     headers += [_clean_category_name(c) for c in categories]
     headers += ["Deductions / Reason", "Plagiarism Flag"]   # Feedback removed
@@ -200,7 +208,12 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict], sheet_title
         marks_cell = ws.cell(row=row_idx, column=col, value=marks)
         col += 1
         if isinstance(marks, (int, float)):
-            marks_cell.fill = _PASS_FILL if marks >= PASS_THRESHOLD else _FAIL_FILL
+            if marks >= pass_mark:
+                marks_cell.fill = _PASS_FILL
+                marks_cell.font = _PASS_FONT
+            else:
+                marks_cell.fill = _FAIL_FILL
+                marks_cell.font = _FAIL_FONT
 
         # Category scores — look up by original key (may have brackets)
         cat_scores = entry.get("category_scores", {})
@@ -224,10 +237,16 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict], sheet_title
         flag_cell  = ws.cell(row=row_idx, column=col, value=short_flag)
         if short_flag:
             flag_cell.font = _FLAG_FONT
+            flag_cell.fill = _FLAG_FILL
 
-        # Borders on all cells in this row
+        # Borders and zebra striping
+        is_even = (row_idx % 2 == 0)
         for c in range(1, col + 1):
-            ws.cell(row=row_idx, column=c).border = _THIN_BORDER
+            cell = ws.cell(row=row_idx, column=c)
+            cell.border = _THIN_BORDER
+            # Apply zebra striping ONLY if the cell doesn't already have a fill
+            if is_even and cell.fill.fill_type is None:
+                cell.fill = _ALT_ROW_FILL
 
     _auto_width(ws)
 
@@ -263,14 +282,14 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict],
             stats_data.append(("", r.get("filename", r.get("name", "unknown"))))
 
     if marks:
-        # Pass threshold as 50% of actual rubric total — not the raw config value
+        # Pass threshold based on PASS_THRESHOLD percentage
         rubric_total  = int(max(marks))  # Derive from data — accurate regardless of config
-        pass_mark     = round(rubric_total * 0.5)
+        pass_mark     = round(rubric_total * (PASS_THRESHOLD / 100.0))
         passed        = sum(1 for m in marks if m >= pass_mark)
         stats_data += [
             ("", ""),
             ("Total Marks (per assignment)", rubric_total),
-            ("Pass Mark",                   f"≥ {pass_mark} (50%)"),
+            ("Pass Mark",                   f"≥ {pass_mark} ({PASS_THRESHOLD}%)"),
             ("Average",       round(statistics.mean(marks), 2)),
             ("Median",        round(statistics.median(marks), 2)),
             ("Std Deviation", round(statistics.stdev(marks), 2) if len(marks) > 1 else "N/A"),
@@ -304,6 +323,12 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict],
         for grade, count in buckets.items():
             stats_data.append((grade, count))
 
+    import datetime
+    stats_data.append(("", ""))
+    stats_data.append(("Report Metadata", ""))
+    stats_data.append(("Grading Engine", "AutoGrader Agent"))
+    stats_data.append(("Generated At", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
     # Write headers
     for col_idx, h in enumerate(["Metric", "Value"], start=1):
         cell = ws.cell(row=1, column=col_idx, value=h)
@@ -312,8 +337,19 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict],
         cell.border = _THIN_BORDER
 
     for row_idx, (metric, value) in enumerate(stats_data, start=2):
-        ws.cell(row=row_idx, column=1, value=metric).border = _THIN_BORDER
-        ws.cell(row=row_idx, column=2, value=value).border  = _THIN_BORDER
+        c1 = ws.cell(row=row_idx, column=1, value=metric)
+        c2 = ws.cell(row=row_idx, column=2, value=value)
+        c1.border = _THIN_BORDER
+        c2.border = _THIN_BORDER
+
+        if metric in ("Failed Submissions", "Grade Distribution", "Report Metadata"):
+            c1.font = _HEADER_FONT
+            c1.fill = _SUBHEADER_FILL
+            c2.font = _HEADER_FONT
+            c2.fill = _SUBHEADER_FILL
+        elif row_idx % 2 == 0:
+            c1.fill = _ALT_ROW_FILL
+            c2.fill = _ALT_ROW_FILL
 
     last_row = len(stats_data) + 1
     _auto_width(ws)
