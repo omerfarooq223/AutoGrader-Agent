@@ -15,8 +15,6 @@ import os
 import re
 from pathlib import Path
 
-import config
-from config import MODEL
 from utils.retry import retry_api_call
 from utils.llm_client import call_llm
 

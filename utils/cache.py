@@ -20,7 +20,7 @@ from config import CACHE_FILENAME
 logger = logging.getLogger(__name__)
 
 # Bump this when the result format changes to auto-discard stale caches.
-# v2: deterministic Python scoring (scores/deductions computed in Python, not LLM)
+# v2: deterministic Python scoring (scores/deductions computed in Python)
 CACHE_VERSION = 2
 
 

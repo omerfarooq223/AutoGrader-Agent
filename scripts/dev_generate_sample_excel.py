@@ -2,7 +2,7 @@ import sys
 import os
 
 # Ensure the parent directory is in sys.path so imports work
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from skills.report_writer.excel_writer import write_results
 

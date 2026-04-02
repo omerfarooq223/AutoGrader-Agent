@@ -6,11 +6,13 @@ Run with:  streamlit run app.py
 
 import json
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 import config
@@ -58,9 +60,13 @@ st.markdown(
     '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">',
     unsafe_allow_html=True,
 )
+st.markdown(
+    '<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded" rel="stylesheet">',
+    unsafe_allow_html=True,
+)
 
 st.markdown("""<style>
-html, body, [class*="st-"], .stMarkdown, .stTextArea textarea,
+html, body, .stMarkdown, .stTextArea textarea,
 input, button, select, .stExpander, p, h1, h2, h3, h4 {
     font-family: 'Inter', sans-serif !important;
 }
@@ -71,11 +77,21 @@ input, button, select, .stExpander, p, h1, h2, h3, h4 {
     padding: 2.2rem 4rem 1.8rem 4rem;
 }
 .ag-header h1 {
-    color: #ffffff;
     font-size: 2.2rem;
     font-weight: 800;
     margin: 0;
     letter-spacing: -0.3px;
+    color: transparent;
+    background: linear-gradient(110deg, #ffffff 20%, #9ad4ff 42%, #ffffff 62%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    text-shadow: 0 0 12px rgba(154, 212, 255, 0.2);
+    animation: shine-brand 3.2s linear infinite;
+}
+@keyframes shine-brand {
+    from { background-position: 0% 0; }
+    to { background-position: 200% 0; }
 }
 .ag-header .accent-line {
     width: 48px;
@@ -92,12 +108,24 @@ input, button, select, .stExpander, p, h1, h2, h3, h4 {
 }
 .step-section {
     position: relative;
-    padding: 1rem 0 0.25rem 0;
+    padding: 0.55rem 0 0.1rem 0;
+}
+.step-watermark {
+    position: absolute;
+    top: -0.3rem;
+    left: -0.15rem;
+    font-size: 5rem;
+    font-weight: 800;
+    color: #e2e8f0;
+    line-height: 1;
+    user-select: none;
+    pointer-events: none;
+    z-index: 0;
 }
 .step-content {
     position: relative;
     z-index: 1;
-    padding-left: 0;
+    padding-left: 3.6rem;
 }
 .step-content h3 {
     font-size: 1.15rem;
@@ -113,7 +141,7 @@ input, button, select, .stExpander, p, h1, h2, h3, h4 {
 .step-divider {
     border: none;
     border-top: 1px solid #e2e8f0;
-    margin: 0.75rem 0 0 0;
+    margin: 0.35rem 0 0 0;
 }
 [data-testid="stFileUploader"] section {
     background: #ffffff;
@@ -215,7 +243,11 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(2) .stButton > button[kind=
     border-color: #3b82f6;
     box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
 }
-.streamlit-expanderHeader { font-weight: 600; color: #334155; }
+.streamlit-expanderHeader {
+    font-weight: 600;
+    color: #334155;
+    line-height: 1.25;
+}
 .reset-btn .stButton > button {
     background: transparent !important;
     color: #64748b !important;
@@ -245,6 +277,7 @@ st.write("")
 def _step(number: int, title: str, subtitle: str):
     st.markdown(f"""
     <div class="step-section">
+        <span class="step-watermark">{number}</span>
         <div class="step-content">
             <h3>{title}</h3>
             <p class="step-desc">{subtitle}</p>
@@ -254,8 +287,10 @@ def _step(number: int, title: str, subtitle: str):
 
 
 def _status(text: str, kind: str = "info"):
+    rendered = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
     st.markdown(
-        f'<div class="status-msg status-{kind}">{text}</div>',
+        f'<div class="status-msg status-{kind}">{rendered}</div>',
         unsafe_allow_html=True,
     )
 
@@ -319,7 +354,6 @@ steps = [
     (4, "Grade", st.session_state.results is not None),
     (5, "Results", st.session_state.results is not None),
 ]
-# Horizontal stepper removed — replaced by sidebar vertical stepper below
 
 # ── Sidebar vertical stepper ────────────────────────────────────
 with st.sidebar:
@@ -328,34 +362,90 @@ with st.sidebar:
     <style>
     [data-testid="stSidebar"] {
         background: linear-gradient(180deg, #0f172a 0%, #111827 60%, #0d1f35 100%) !important;
-        min-width: 200px !important;
-        max-width: 200px !important;
+        min-width: 220px !important;
+        max-width: 220px !important;
     }
+
+    /* Make the sidebar a full-height flex column */
+    [data-testid="stSidebar"] > div:first-child {
+        display: flex !important;
+        flex-direction: column !important;
+        height: 100vh !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+    }
+    [data-testid="stSidebar"] .block-container {
+        display: flex !important;
+        flex-direction: column !important;
+        flex: 1 !important;
+        height: 100% !important;
+        padding: 0 !important;
+        min-height: 0 !important;
+    }
+    [data-testid="stSidebar"] .block-container > div {
+        display: flex !important;
+        flex-direction: column !important;
+        flex: 1 !important;
+        min-height: 0 !important;
+    }
+
+    /* ── Progress title ── */
     .vstp-title {
         color: #94a3b8;
         font-size: 0.65rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 1px;
-        padding: 1.4rem 1.2rem 0.8rem 1.2rem;
+        padding: 0rem 1.2rem 0.35rem 1.2rem;
         margin: 0;
+        flex-shrink: 0;
     }
-    .vstp {
+
+    /* ── Outer wrapper grows to fill available space ── */
+    .vstp-outer {
         display: flex;
-        align-items: flex-start;
-        padding: 0.25rem 1.2rem;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
         position: relative;
-        gap: 0.75rem;
     }
-    .vstp-line {
+
+    /* ── Inner wrap: evenly spaces the 5 steps ── */
+    .vstp-wrap {
+        height: calc(100vh - 11.2rem);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        position: relative;
+        padding: 0;
+        min-height: 0;
+    }
+
+    /* ── Continuous vertical line through all circles ── */
+    .vstp-wrap::before {
+        content: "";
         position: absolute;
-        left: 1.85rem;
-        top: 1.8rem;
-        bottom: -0.5rem;
+        left: calc(1.2rem + 11px);   /* 1.2rem sidebar padding + half of 24px dot */
+        top: 0;
+        bottom: 0;
         width: 2px;
         background: #1e293b;
         z-index: 0;
     }
+
+    /* ── Each step row ── */
+    .vstp {
+        display: flex;
+        align-items: center;
+        padding: 0 1.2rem;
+        gap: 0.75rem;
+        position: relative;
+        flex: 1 1 0;
+        min-height: 4rem;
+        z-index: 1;
+    }
+
+    /* ── Circle ── */
     .vstp-dot {
         width: 24px;
         height: 24px;
@@ -366,12 +456,14 @@ with st.sidebar:
         justify-content: center;
         font-size: 0.7rem;
         font-weight: 800;
-        z-index: 1;
-        margin-top: 0.1rem;
+        position: relative;
+        z-index: 2;
     }
     .vstp-dot.done   { background: #22c55e; color: #fff; }
     .vstp-dot.active { background: #3b82f6; color: #fff; box-shadow: 0 0 0 3px rgba(59,130,246,0.25); }
     .vstp-dot.todo   { background: #1e293b; color: #475569; border: 2px solid #334155; }
+
+    /* ── Text ── */
     .vstp-info { flex: 1; }
     .vstp-label {
         font-size: 0.75rem;
@@ -390,11 +482,12 @@ with st.sidebar:
     .vstp-status.done   { color: #4ade80; }
     .vstp-status.active { color: #93c5fd; }
     .vstp-status.todo   { color: #334155; }
-    .vstp:last-child .vstp-line { display: none; }
+
+    /* ── Footer pinned to bottom ── */
     .sidebar-footer {
-        margin-top: 3rem;
-        padding-bottom: 2rem;
-        padding-top: 0.75rem;
+        flex-shrink: 0;
+        margin-top: auto;
+        padding: 0.65rem 1rem 0.85rem 1rem;
         border-top: 1px solid #1e293b;
         text-align: center;
     }
@@ -407,44 +500,61 @@ with st.sidebar:
         margin: 0 0 0.25rem 0;
     }
     .sidebar-footer .author-name {
-        color: #f1f5f9;
-        font-size: 0.85rem;
+        font-size: 0.94rem;
         font-weight: 800;
         margin: 0;
         letter-spacing: -0.2px;
+        color: transparent;
+        background: linear-gradient(110deg, #ffffff 20%, #9ad4ff 42%, #ffffff 62%);
+        background-size: 200% 100%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        text-shadow: 0 0 10px rgba(154, 212, 255, 0.25);
+        animation: shine-author 3.2s linear infinite;
+    }
+    @keyframes shine-author {
+        from { background-position: 0% 0; }
+        to   { background-position: 200% 0; }
     }
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown('<p class="vstp-title">Progress</p>', unsafe_allow_html=True)
-
     _step_defs = [
-        (1, "Upload Files",    upload_done),
-        (2, "Rubric",          st.session_state.rubric_approved),
-        (3, "Answer Key",      st.session_state.answer_key_approved),
-        (4, "Grade",           st.session_state.results is not None),
-        (5, "Results",         st.session_state.results is not None),
+        (1, "Upload Files", upload_done),
+        (2, "Rubric",       st.session_state.rubric_approved),
+        (3, "Answer Key",   st.session_state.answer_key_approved),
+        (4, "Grade",        st.session_state.results is not None),
+        (5, "Results",      st.session_state.results is not None),
     ]
-    _sidebar_html = ""
+
+    _steps_html = ""
     for _idx, _title, _done in _step_defs:
         _is_active = (_idx == active_step)
         _cls = "done" if _done else "active" if _is_active else "todo"
         _icon = "✓" if _done else str(_idx)
         _status_text = "Complete" if _done else "In progress" if _is_active else "Waiting"
-        _is_last = (_idx == len(_step_defs))
-        _sidebar_html += f"""<div class="vstp">
-{"" if _is_last else '<div class="vstp-line"></div>'}
-<div class="vstp-dot {_cls}">{_icon}</div>
-<div class="vstp-info">
-<p class="vstp-label {_cls}">{_title}</p>
-<p class="vstp-status {_cls}">{_status_text}</p>
-</div>
-</div>"""
-    st.markdown(_sidebar_html, unsafe_allow_html=True)
-    st.markdown("""<div class="sidebar-footer">
-<p class="built-by">Built by</p>
-<p class="author-name">Muhammad Umar Farooq</p>
-</div>""", unsafe_allow_html=True)
+        _steps_html += f"""
+        <div class="vstp">
+            <div class="vstp-dot {_cls}">{_icon}</div>
+            <div class="vstp-info">
+                <p class="vstp-label {_cls}">{_title}</p>
+                <p class="vstp-status {_cls}">{_status_text}</p>
+            </div>
+        </div>"""
+
+    st.markdown(f"""
+        <p class="vstp-title">Progress</p>
+        <div class="vstp-outer">
+            <div class="vstp-wrap">
+                {_steps_html}
+            </div>
+            <div style="flex: 1 1 auto;"></div>
+        </div>
+        <div class="sidebar-footer">
+            <p class="built-by">Built by</p>
+            <p class="author-name">Muhammad Umar Farooq</p>
+        </div>
+    """, unsafe_allow_html=True)
 
 # ── Step 1 — Upload Files ───────────────────────────────────────
 _step(1, "Upload Files", "Upload your submissions ZIP and assignment brief.")
@@ -494,7 +604,6 @@ if zip_file and brief_file:
             )
 
             if st.session_state.rubric_manual_text.strip():
-                # Live preview — parse JSON silently, no LLM call needed
                 _preview_text = st.session_state.rubric_manual_text.strip()
                 try:
                     _preview_obj = json.loads(_preview_text)
@@ -513,7 +622,6 @@ if zip_file and brief_file:
                     else:
                         st.caption("JSON parsed but no criteria found — check structure.")
                 except json.JSONDecodeError:
-                    # Not valid JSON yet — show Format button as fallback
                     st.caption("Not valid JSON yet — paste JSON directly or use Format button below.")
                     if not st.session_state.rubric_refined:
                         if st.button("Format as JSON / Table", help="Converts your raw text into a structured table without changing the wording."):
@@ -559,7 +667,6 @@ if zip_file and brief_file:
                             st.session_state.rubric_refine_view = False
                             st.rerun()
 
-                # Approve
                 if not st.session_state.rubric_approved:
                     if st.button("Approve rubric", key="approve_manual_rubric"):
                         st.session_state.rubric = st.session_state.rubric_manual_text
@@ -567,7 +674,6 @@ if zip_file and brief_file:
                         st.rerun()
 
         else:
-            # Auto-generate
             if st.button("Generate rubric from brief", key="generate_auto_rubric"):
                 if not st.session_state.brief_text:
                     suffix = Path(brief_file.name).suffix
@@ -618,7 +724,6 @@ if zip_file and brief_file:
                 if isinstance(rubric_obj, dict) and "criteria" in rubric_obj:
                     import re as _re
                     def _split_bands(desc: str, max_score) -> tuple:
-                        """Extract full/partial/minimal bands — supports [N Marks]: and [Full]/[Partial]/[Minimal]."""
                         parts = _re.split(r'\[(?:\d+\s*Marks?|Full|Partial|Minimal)\]:\s*', desc, flags=_re.IGNORECASE)
                         if len(parts) >= 4:
                             return parts[1].strip(), parts[2].strip(), parts[3].strip()
@@ -626,9 +731,7 @@ if zip_file and brief_file:
                             return parts[1].strip(), parts[2].strip(), ""
                         return desc, "", ""
 
-                    # Build header using actual score values from rubric
                     criteria = rubric_obj.get("criteria", [])
-                    # Check if any criterion has band descriptions
                     has_bands = any(
                         _re.search(r'\[(\d+\s*Marks?|Full|Partial|Minimal)\]', c.get("description",""), _re.IGNORECASE)
                         for c in criteria
@@ -688,7 +791,6 @@ _step(3, "Answer Key", "Provide an answer key to improve grading accuracy.")
 
 if st.session_state.rubric_approved:
 
-
     if not st.session_state.answer_key_approved:
         answer_key_mode = st.radio(
             "How would you like to provide the answer key?",
@@ -721,7 +823,6 @@ if st.session_state.rubric_approved:
                 tmp_path = _save_temp(uploaded_ak, suffix)
                 try:
                     st.session_state.answer_key_final = read_file(tmp_path)
-                    # Clear manual text so it never overrides the uploaded file on rerun
                     st.session_state.answer_key_manual_text = ""
                 except Exception as _e:
                     st.error(f"Could not read answer key file: {_e}")
@@ -730,8 +831,6 @@ if st.session_state.rubric_approved:
                     os.unlink(tmp_path)
             elif st.session_state.answer_key_manual_text.strip():
                 st.session_state.answer_key_final = st.session_state.answer_key_manual_text
-            # IMPORTANT: do NOT reset answer_key_final here
-            # This block reruns on every Streamlit interaction
 
         else:
             if st.button("Generate answer key from brief", key="generate_auto_answer_key"):
@@ -771,7 +870,6 @@ if st.session_state.rubric_approved:
                     height=180,
                     key="answer_key_auto_display",
                 )
-                # Keep the grading input in sync with user edits.
                 if not st.session_state.answer_key_approved:
                     st.session_state.answer_key_auto_text = st.session_state.answer_key_auto_display
                     st.session_state.answer_key_final = st.session_state.answer_key_auto_display
@@ -804,7 +902,6 @@ _step(4, "Grade Submissions", "Each submission is graded against the rubric and 
 
 if st.session_state.rubric_approved and st.session_state.answer_key_approved and zip_file and st.session_state.results is None:
     if st.session_state.grading_in_progress:
-        # Show a cancel button while grading is happening
         if st.button("Cancel Grading", type="secondary", width="stretch"):
             st.session_state.grading_in_progress = False
             st.rerun()
@@ -820,7 +917,6 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
     if start_btn:
         st.session_state.grading_in_progress = True
         tmp_zip = _save_temp(zip_file, ".zip")
-        # Persistent session directory — survives between runs for cache resume
         zip_stem = Path(tmp_zip).stem
         session_dir = str(Path(tmp_zip).parent / f".autograder_{zip_stem}")
         Path(session_dir).mkdir(exist_ok=True)
@@ -831,7 +927,6 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                 if st.session_state.get("answer_key_uploaded_filename"):
                     exclude.append(st.session_state.answer_key_uploaded_filename)
                 submissions, extract_dir = extract_and_collect(tmp_zip, exclude_filenames=exclude)
-                # Remove any submission whose extracted name matches the answer key author
                 if st.session_state.get("answer_key_uploaded_filename"):
                     ak_stem = Path(st.session_state.answer_key_uploaded_filename).stem.lower()
                     before = len(submissions)
@@ -839,7 +934,6 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                     if len(submissions) < before:
                         st.warning(f"Excluded {before - len(submissions)} file(s) matching answer key name from grading.")
 
-            # Load cache from persistent session dir — resumes grading after crash or restart
             cached = load_cache(session_dir)
             cached_count = sum(
                 1 for s in submissions
@@ -856,7 +950,7 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
 
             progress = st.progress(0, text="Grading submissions…")
             log_area = st.empty()
-            
+
             lock = threading.Lock()
             progress_stats = {"n": 0}
             total = len(submissions)
@@ -871,8 +965,7 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                     )
                     score = _result.get("marks", "Error")
                     logs.append(f"✓ {filename} — Score: {score}")
-                    log_area.code("\n".join(logs[-10:]), language="text")  # type: ignore
-                    # Save to persistent session_dir so cache survives between runs
+                    log_area.code("\n".join(logs[-10:]), language="text")
                     key = _result.get("cache_key", filename)
                     cached[key] = _result
                     save_cache(session_dir, cached)
@@ -892,8 +985,6 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xl:
                 report_path = tmp_xl.name
-            # Save report immediately — don't block on LLM insights call
-            # Extract assignment metadata from first submission with lms_meta
             _lms = next((s.get("lms_meta", {}) for s in submissions
                          if s.get("lms_meta", {}).get("assignment_name")), {})
             st.session_state.lms_meta = _lms
@@ -903,8 +994,7 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                 course_code=_lms.get("course_code", ""),
                 semester=_lms.get("semester", ""),
             )
-            clear_cache(session_dir)  # Clear only after report successfully written
-            # Generate insights in background so UI stays responsive
+            clear_cache(session_dir)
             def _gen_insights():
                 try:
                     from skills.report_writer.excel_writer import generate_class_insights
@@ -943,7 +1033,7 @@ if st.session_state.results is not None:
     numeric = [r["marks"] for r in results if isinstance(r.get("marks"), (int, float))]
     if numeric:
         flagged = sum(1 for r in results if r.get("plagiarism_flag"))
-        pass_mark = round(max(numeric) * 0.5)  # 50% of rubric total
+        pass_mark = round(max(numeric) * 0.5)
         passed  = sum(1 for m in numeric if m >= pass_mark)
         avg     = sum(numeric) / len(numeric)
         m1, m2, m3, m4 = st.columns(4)
@@ -959,13 +1049,6 @@ if st.session_state.results is not None:
         with m4:
             st.markdown(_metric(flagged, "Plagiarism Flags"), unsafe_allow_html=True)
 
-    st.write("")
-
-    if st.session_state.class_insights:
-        with st.expander("Class Insights (Top 3 Common Mistakes)", expanded=False):
-            for i, insight in enumerate(st.session_state.class_insights, start=1):
-                st.markdown(f"**{i}.** {insight}")
-
     df = pd.DataFrame(results)
     cols = ["name", "id", "marks"]
     all_cats = sorted({c for r in results for c in r.get("category_scores", {})})
@@ -978,17 +1061,190 @@ if st.session_state.results is not None:
     table_cols = [c for c in cols if c in df.columns]
     if "plagiarism_flag" in table_cols:
         df["plagiarism_flag"] = df["plagiarism_flag"].apply(shorten_plagiarism_flag)
-    # Coerce all numeric columns — error submissions leave empty strings
-    # which crash PyArrow when it tries to infer column types
     for _col in df.columns:
         if _col not in ("name", "id", "filename", "cache_key", "deductions", "plagiarism_flag", "feedback"):
             df[_col] = pd.to_numeric(df[_col], errors="coerce")
 
+    chart_col1, chart_col2 = st.columns(2)
+
+    with chart_col1:
+        score_counts = pd.Series(
+            [r["marks"] for r in results if isinstance(r.get("marks"), (int, float))]
+        ).value_counts().sort_index()
+        if not score_counts.empty:
+            score_counts = score_counts.reindex(
+                range(0, int(score_counts.index.max()) + 1), fill_value=0
+            )
+        if not score_counts.empty:
+            score_fig = go.Figure(
+                data=[
+                    go.Bar(
+                        x=score_counts.index.tolist(),
+                        y=score_counts.values.tolist(),
+                        marker_color="#3b82f6",
+                    )
+                ]
+            )
+            score_fig.update_layout(
+                title="Score Distribution",
+                xaxis_title="Score",
+                yaxis_title="Number of Students",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=10, r=10, t=45, b=10),
+            )
+            st.plotly_chart(score_fig, use_container_width=True)
+
+    with chart_col2:
+        rubric_max_scores: dict[str, float] = {}
+        try:
+            rubric_obj = json.loads(st.session_state.rubric) if st.session_state.rubric else {}
+            for c in rubric_obj.get("criteria", []):
+                name = str(c.get("name", "")).strip()
+                max_score = c.get("max_score")
+                if name and isinstance(max_score, (int, float)):
+                    rubric_max_scores[name] = float(max_score)
+                    rubric_max_scores[name.strip("[]")] = float(max_score)
+        except Exception:
+            rubric_max_scores = {}
+
+        avg_labels = []
+        avg_values = []
+        avg_colors = []
+        for cat in all_cats:
+            cat_series = pd.to_numeric(df[cat], errors="coerce")
+            if cat_series.notna().sum() == 0:
+                continue
+            avg_score = float(cat_series.mean())
+            max_score = rubric_max_scores.get(cat, rubric_max_scores.get(cat.strip("[]"), None))
+
+            if isinstance(max_score, (int, float)) and max_score > 0:
+                ratio = avg_score / float(max_score)
+                if ratio >= 0.70:
+                    color = "#16a34a"
+                elif ratio >= 0.50:
+                    color = "#f59e0b"
+                else:
+                    color = "#dc2626"
+            else:
+                color = "#f59e0b"
+
+            avg_labels.append(cat)
+            avg_values.append(avg_score)
+            avg_colors.append(color)
+
+        if avg_values:
+            criterion_fig = go.Figure(
+                data=[
+                    go.Bar(
+                        x=avg_values,
+                        y=avg_labels,
+                        orientation="h",
+                        marker_color=avg_colors,
+                    )
+                ]
+            )
+            max_axis = 0.0
+            for cat in avg_labels:
+                max_axis = max(max_axis, rubric_max_scores.get(cat, rubric_max_scores.get(cat.strip("[]"), 0.0)))
+            if max_axis <= 0:
+                max_axis = max(avg_values)
+            criterion_fig.update_layout(
+                title="Average Score per Criterion",
+                xaxis_title="Average Score",
+                yaxis_title="",
+                xaxis=dict(range=[0, max_axis]),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=150, r=10, t=45, b=10),
+            )
+            st.plotly_chart(criterion_fig, use_container_width=True)
+
+    if st.session_state.class_insights:
+        with st.expander("Class Insights (Top 3 Common Mistakes)", expanded=False):
+            for i, insight in enumerate(st.session_state.class_insights, start=1):
+                st.markdown(f"**{i}.** {insight}")
+
     with st.expander("View detailed grading table", expanded=True):
-        st.dataframe(df[table_cols], width="stretch", hide_index=True)
+        editable_cols = ["marks"] + [c for c in all_cats if c in df.columns]
+        editor_cols = ["name", "id"] + editable_cols
+        editable_df = df[editor_cols].copy()
+
+        _col_cfg = {
+            "name": st.column_config.TextColumn("Name", disabled=True),
+            "id":   st.column_config.TextColumn("ID",   disabled=True),
+            "marks": st.column_config.NumberColumn("Total Marks", disabled=True,
+                help="Auto-calculated from criterion scores"),
+        }
+        for _cat in all_cats:
+            _max = rubric_max_scores.get(_cat, rubric_max_scores.get(_cat.strip("[]"), None))
+            _col_cfg[_cat] = st.column_config.NumberColumn(
+                _cat,
+                min_value=0,
+                max_value=float(_max) if _max else None,
+                step=0.5,
+                help=f"Max: {_max}" if _max else None,
+            )
+
+        edited_df = st.data_editor(
+            editable_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config=_col_cfg,
+            key="results_override_editor",
+        )
+
+        if st.button("Apply score overrides", key="apply_score_overrides"):
+            results_by_name = {r.get("name", ""): dict(r) for r in results}
+            updated_results = []
+            for i, (_, row) in enumerate(edited_df.iterrows()):
+                name_key = str(row.get("name", ""))
+                if name_key in results_by_name:
+                    updated = dict(results_by_name[name_key])
+                else:
+                    updated = dict(results[i]) if i < len(results) else {}
+
+                marks_val = pd.to_numeric(row["marks"], errors="coerce")
+                if pd.notna(marks_val):
+                    updated["marks"] = float(marks_val)
+
+                cat_scores = dict(updated.get("category_scores", {}))
+                for cat in all_cats:
+                    if cat not in row.index:
+                        continue
+                    cat_val = pd.to_numeric(row[cat], errors="coerce")
+                    if pd.notna(cat_val):
+                        cat_scores[cat] = float(cat_val)
+                updated["category_scores"] = cat_scores
+
+                numeric_cats = [v for v in cat_scores.values() if isinstance(v, (int, float))]
+                if numeric_cats:
+                    updated["marks"] = sum(numeric_cats)
+
+                updated_results.append(updated)
+
+            st.session_state.results = updated_results
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xl:
+                report_path = tmp_xl.name
+            try:
+                _dl_lms = st.session_state.get("lms_meta", {})
+                write_results(
+                    updated_results,
+                    report_path,
+                    return_insights=False,
+                    assignment_name=_dl_lms.get("assignment_name", ""),
+                    course_code=_dl_lms.get("course_code", ""),
+                    semester=_dl_lms.get("semester", ""),
+                )
+                st.session_state.report_bytes = Path(report_path).read_bytes()
+            finally:
+                Path(report_path).unlink(missing_ok=True)
+
+            st.success("Score overrides applied. Metrics, charts, and download now reflect your edits.")
+            st.rerun()
 
     st.write("")
-    # Build filename from LMS metadata: "CC323 - Assignment 2 - F2025.xlsx"
     _dl_lms = st.session_state.get("lms_meta", {})
     _parts = [p for p in [
         _dl_lms.get("course_code", ""),
@@ -1014,5 +1270,4 @@ if st.session_state.rubric or st.session_state.results is not None:
             st.session_state[key] = val
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
-
-
+    

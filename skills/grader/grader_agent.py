@@ -13,13 +13,11 @@ Features:
 
 import json
 import logging
-import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (
-    MODEL,
     MAX_CONCURRENT_GRADES,
     GRADING_MAX_OUTPUT_TOKENS,
     MAX_SUBMISSION_CHARS,
@@ -153,7 +151,7 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str 
             }
         result = recovered
 
-    # ── Name: always use LMS folder name, LLM is fallback ──
+    # ── Name: prefer LMS folder name, then parsed name fallback ──
     if lms_name:
         result["name"] = lms_name
     else:
@@ -163,7 +161,7 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str 
         cleaned = re.sub(r'^[\s_\-\d]+|[\s_\-\d]+$', '', cleaned).strip()
         result["name"] = cleaned if cleaned else fallback_name
 
-    # ── ID: LLM extracts from file content, filename as fallback ──
+    # ── ID: extract from content, use filename as fallback ──
     raw_id = str(result.get("id", "")).strip()
     if not raw_id or raw_id.lower() in ("n/a", "not found", "none", ""):
         result["id"] = fallback_name
@@ -191,7 +189,7 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str 
         else:
             continue
 
-        # Fuzzy-match LLM criterion name to rubric criterion name
+        # Fuzzy-match returned criterion names to rubric criterion names.
         matched_name = _match_criterion_name(k, rubric_names) if rubric_names else None
         canonical_name = matched_name or k
 
@@ -208,8 +206,7 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str 
             cat_reasons[rubric_crit] = "criterion not evaluated by grader"
             logger.warning("LLM omitted criterion '%s' — assigning 0.", rubric_crit)
 
-    # If LLM returned no reasons (old format / cached), try extracting from
-    # LLM's deductions field to preserve backward compatibility
+    # Backfill reasons from legacy deductions text for cached older results.
     if not any(cat_reasons.values()):
         old_deductions = result.get("deductions", "") or ""
         if isinstance(old_deductions, list):
@@ -228,7 +225,7 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str 
                         cat_reasons[k] += f", {reason_text}"
                     break
 
-    # Compute total marks — pure Python, never trust LLM's total
+    # Compute total marks in Python.
     if cat_scores:
         total_float = sum(cat_scores.values())
         # Display as int when all scores are whole numbers (13.0 → 13)
@@ -363,7 +360,7 @@ def grade_submission(
         )
 
     # Guard: if submission is empty (e.g. scanned PDF with no text layer),
-    # return a clean error instead of sending empty content to LLM
+    # return a clean error instead of sending empty content to the grader.
     if not submission_for_llm or len(submission_for_llm.strip()) < 50:
         return {
             "name":            lms_name or filename,

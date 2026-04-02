@@ -97,6 +97,13 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - **Class Insights**: deduction reasons are trimmed (300 chars each, 8000 char total cap) and sent to the LLM to identify top 3 most common mistakes. Students with grading errors are excluded. In `app.py`, insights are generated in a **background thread** so the UI stays responsive — the report file is available immediately regardless of how long insights take.
 - The grading cache is cleared only **after** the report is successfully written — a crash during report generation does not lose grading progress.
 
+### Step 9: Results UI Analytics & Manual Override
+- In Streamlit Step 5, results render two side-by-side charts:
+  - **Score Distribution** (bar chart): score values on X-axis, student count on Y-axis.
+  - **Average Score per Criterion** (horizontal bars): criterion means with threshold colors based on rubric max score.
+- Teachers can edit per-student criterion scores directly in the UI table.
+- On **Apply score overrides**, totals are recalculated, in-memory results are updated, and the downloadable Excel report is regenerated immediately.
+
 ---
 
 ## Error Handling Strategy

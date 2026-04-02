@@ -3,10 +3,9 @@ Extraction utilities for reading student submissions.
 Supports: PDF, DOCX, .py, .cpp, .ipynb
 """
 
-import base64
 import json
 import logging
-import shutil
+import re
 import zipfile
 import os
 import tempfile
@@ -14,15 +13,13 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 from docx import Document
-from groq import Groq
 
 import config
-from utils.retry import retry_api_call
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".py", ".cpp", ".ipynb", ".md"}
-MAX_FILE_SIZE_MB = 20  # Files larger than this are skipped — LLM context would overflow
+MAX_FILE_SIZE_MB = 20  # Files larger than this are skipped to avoid huge prompt payloads
 
 _VISION_PROMPT = (
     "Describe what is shown in this image in the context of a student assignment. "
@@ -212,7 +209,6 @@ def _parse_lms_path(file_path: str, base_dir: str) -> dict:
         <STUDENT NAME>_<number>_assignsubmission_file/
           actual_file.ext
     """
-    import re as _re
     rel = os.path.relpath(file_path, base_dir)
     parts = Path(rel).parts
 
@@ -223,22 +219,22 @@ def _parse_lms_path(file_path: str, base_dir: str) -> dict:
 
     for part in parts:
         # Student name folder: "ABDUL REHMAN NAEEM RIAZ_837796_assignsubmission_file"
-        name_match = _re.match(r"^([A-Za-z][A-Za-z\s]+?)_\d+_assignsubmission", part)
+        name_match = re.match(r"^([A-Za-z][A-Za-z\s]+?)_\d+_assignsubmission", part)
         if name_match:
             student_name = " ".join(name_match.group(1).split()).title()
 
         # Assignment name from parent folder
-        assign_match = _re.search(r"(Assignment\s+\d+)", part, _re.IGNORECASE)
+        assign_match = re.search(r"(Assignment\s+\d+)", part, re.IGNORECASE)
         if assign_match:
             assignment_name = assign_match.group(1).title()
 
         # Course code e.g. CC323
-        course_match = _re.search(r"-([A-Z]{2,6}\d{3})-", part)
+        course_match = re.search(r"-([A-Z]{2,6}\d{3})-", part)
         if course_match:
             course_code = course_match.group(1)
 
         # Semester e.g. F2025
-        sem_match = _re.search(r"[\s\-]((?:F|S|SP|FA)\d{4})[\s\-]", part, _re.IGNORECASE)
+        sem_match = re.search(r"[\s\-]((?:F|S|SP|FA)\d{4})[\s\-]", part, re.IGNORECASE)
         if sem_match:
             semester = sem_match.group(1).upper()
 
@@ -248,6 +244,57 @@ def _parse_lms_path(file_path: str, base_dir: str) -> dict:
         "course_code":     course_code,
         "semester":        semester,
     }
+
+
+def _extract_nested_archives(directory: str, max_passes: int = 3) -> None:
+    """
+    Extract .zip files found inside the extracted LMS bundle.
+    Handles "ZIP within ZIP" submissions by recursively unpacking a few levels.
+    """
+    for _ in range(max_passes):
+        extracted_any = False
+
+        for root, _dirs, files in os.walk(directory):
+            if any(part.startswith(".") or part.startswith("__") for part in Path(root).parts):
+                continue
+
+            for filename in files:
+                if Path(filename).suffix.lower() != ".zip":
+                    continue
+
+                zip_path = os.path.join(root, filename)
+                target_dir = os.path.join(root, f"{Path(filename).stem}_nested_zip")
+                if os.path.exists(target_dir):
+                    continue
+
+                try:
+                    extract_zip(zip_path, target_dir)
+                    extracted_any = True
+                    logger.info("Extracted nested ZIP: %s", zip_path)
+                except Exception as e:
+                    logger.warning("Skipping invalid nested ZIP %s: %s", zip_path, e)
+
+        if not extracted_any:
+            break
+
+
+def _student_group_key(file_path: str, base_dir: str, lms_meta: dict) -> str:
+    """Derive a stable grouping key so each student folder becomes one submission."""
+    rel_parts = Path(os.path.relpath(file_path, base_dir)).parts
+
+    for part in rel_parts:
+        if re.match(r"^.+?_\d+_assignsubmission", part, re.IGNORECASE):
+            return part
+
+    if lms_meta.get("student_name"):
+        return f"student::{lms_meta['student_name'].lower()}"
+
+    if len(rel_parts) >= 2:
+        if re.search(r"assignment|submissions?|class|course|section|semester", rel_parts[0], re.IGNORECASE):
+            return rel_parts[1]
+        return rel_parts[0]
+
+    return "root_submission"
 
 
 def collect_submissions(
@@ -265,10 +312,15 @@ def collect_submissions(
 
     Returns
     -------
-    list[dict] — [{"filename": "...", "path": "...", "content": "..."}, ...]
+    list[dict] — one combined submission per student folder.
     """
     exclude_set = {f.lower() for f in (exclude_filenames or [])}
-    submissions: list[dict] = []
+    grouped: dict[str, dict] = {}
+
+    # First expand any student-provided archive uploads (ZIP inside ZIP).
+    _extract_nested_archives(directory)
+
+    from utils.cache import _make_safe_key
 
     for root, _dirs, files in os.walk(directory):
         # Skip hidden / system directories
@@ -289,45 +341,93 @@ def collect_submissions(
                 continue
 
             full_path = os.path.join(root, filename)
+            rel_path = os.path.relpath(full_path, directory)
             try:
                 file_size_mb = os.path.getsize(full_path) / (1024 * 1024)
                 if file_size_mb > MAX_FILE_SIZE_MB:
                     logger.warning(
                         "Skipping %s — file size %.1fMB exceeds limit of %dMB",
-                        filename, file_size_mb, MAX_FILE_SIZE_MB
+                        filename, file_size_mb, MAX_FILE_SIZE_MB,
                     )
-                    submissions.append({
-                        "filename":  filename,
-                        "path":      full_path,
-                        "content":   f"[SKIPPED: File too large ({file_size_mb:.1f}MB). Student must resubmit.]",
-                        "cache_key": filename,
-                        "error":     "file_too_large",
-                    })
-                    continue
-                content = read_file(full_path)
+                    content = f"[SKIPPED: File too large ({file_size_mb:.1f}MB). Student must resubmit.]"
+                    error = "file_too_large"
+                else:
+                    content = read_file(full_path)
+                    error = None
             except Exception as e:
                 logger.error("Failed to read %s: %s", filename, e)
-                content = None
+                content = "[ERROR: File could not be read. Student must resubmit.]"
+                error = "read_failed"
 
-            from utils.cache import _make_safe_key
-            if content is None:
-                submissions.append({
-                    "filename":  filename,
-                    "path":      full_path,
-                    "content":   "[ERROR: File could not be read. Student must resubmit.]",
-                    "cache_key": filename,
-                    "error":     "read_failed",
-                })
+            lms_meta = _parse_lms_path(full_path, directory)
+            group_key = _student_group_key(full_path, directory, lms_meta)
+            group = grouped.setdefault(
+                group_key,
+                {
+                    "files": [],
+                    "lms_meta": lms_meta,
+                },
+            )
+
+            # Prefer richer LMS metadata if a later file has populated fields.
+            if not group["lms_meta"].get("student_name") and lms_meta.get("student_name"):
+                group["lms_meta"] = lms_meta
+
+            group["files"].append(
+                {
+                    "filename": filename,
+                    "path": full_path,
+                    "rel_path": rel_path,
+                    "content": content,
+                    "error": error,
+                }
+            )
+
+    submissions: list[dict] = []
+    for group_key in sorted(grouped):
+        group = grouped[group_key]
+        files = sorted(group["files"], key=lambda f: f["rel_path"].lower())
+        lms_meta = group["lms_meta"]
+
+        combined_parts = []
+        combined_error = None
+        skipped_files = []
+        for item in files:
+            if item.get("error"):
+                # Exclude placeholder errors from graded submission content.
+                combined_error = combined_error or item["error"]
+                skipped_files.append(item["filename"])
                 continue
-            cache_key = _make_safe_key(filename, content)
-            lms_meta  = _parse_lms_path(full_path, directory)
-            submissions.append({
-                "filename":  filename,
-                "path":      full_path,
-                "content":   content,
-                "cache_key": cache_key,
-                "lms_meta":  lms_meta,
-            })
+            combined_parts.append(
+                f"\n\n===== FILE: {item['rel_path']} =====\n{item['content']}"
+            )
+
+        student_label = lms_meta.get("student_name") or group_key
+        combined_filename = student_label  # Clean name — no suffix needed
+        combined_content = "".join(combined_parts).strip()
+
+        # If all files failed, store a clear error message as content
+        if not combined_content and (combined_error or skipped_files):
+            file_list = ", ".join(skipped_files) if skipped_files else "all files"
+            combined_content = (
+                f"[ERROR: Could not read submission. "
+                f"Failed files: {file_list}. "
+                f"Likely scanned images — student must resubmit as searchable PDF.]"
+            )
+
+        cache_key = _make_safe_key(combined_filename, combined_content)
+
+        submissions.append(
+            {
+                "filename":     combined_filename,
+                "path":         files[0]["path"],
+                "content":      combined_content,
+                "cache_key":    cache_key,
+                "lms_meta":     lms_meta,
+                "source_files": [f["path"] for f in files],
+                **({"error": combined_error} if combined_error else {}),
+            }
+        )
 
     return submissions
 

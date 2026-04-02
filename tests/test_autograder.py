@@ -4,11 +4,8 @@ Run with: python -m pytest tests/ -v
 """
 
 import json
-import os
-import tempfile
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -118,10 +115,39 @@ class TestExtractor:
     def test_collect_skips_hidden_dirs(self, tmp_path):
         (tmp_path / "__MACOSX").mkdir()
         (tmp_path / "__MACOSX" / "junk.py").write_text("bad")
-        (tmp_path / "real.py").write_text("good")
+        (tmp_path / "student_a").mkdir()
+        (tmp_path / "student_a" / "real.py").write_text("good")
         subs = collect_submissions(str(tmp_path))
         assert len(subs) == 1
-        assert subs[0]["filename"] == "real.py"
+        assert "good" in subs[0]["content"]
+
+    def test_collect_concatenates_student_folder_files(self, tmp_path):
+        student = tmp_path / "student_1"
+        student.mkdir()
+        (student / "main.py").write_text("print('hello')")
+        (student / "README.md").write_text("This is my assignment")
+
+        subs = collect_submissions(str(tmp_path))
+        assert len(subs) == 1
+        assert "main.py" in subs[0]["content"]
+        assert "README.md" in subs[0]["content"]
+        assert "print('hello')" in subs[0]["content"]
+        assert "This is my assignment" in subs[0]["content"]
+
+    def test_collect_extracts_nested_zip_and_concatenates(self, tmp_path):
+        student = tmp_path / "student_2"
+        student.mkdir()
+        (student / "runner.py").write_text("print('outer')")
+
+        nested_zip = student / "submission.zip"
+        with zipfile.ZipFile(nested_zip, "w") as zf:
+            zf.writestr("inside.py", "print('inner')")
+
+        subs = collect_submissions(str(tmp_path))
+        assert len(subs) == 1
+        assert "runner.py" in subs[0]["content"]
+        assert "inside.py" in subs[0]["content"]
+        assert "print('inner')" in subs[0]["content"]
 
 
 # ── Plagiarism tests ───────────────────────────────────────────

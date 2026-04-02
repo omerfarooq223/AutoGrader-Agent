@@ -9,7 +9,7 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 - Lets you provide or generate an **answer key/solution** (manual, file upload, or LLM-generated) for accurate grading
 - **Grades each submission** against the rubric — LLM evaluates each criterion and provides a score with a brief reason; **all math is done by Python** (totals, deduction amounts, deduction text formatting, score capping)
 - **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram)
-- Outputs a styled **Excel report** with per-criterion breakdown, class statistics, and **LLM-generated class insights** (top 3 common mistakes)
+- Outputs a styled **Excel report** with per-criterion breakdown, class statistics, and class insights (top 3 common mistakes)
 
 ## Demo
 
@@ -34,6 +34,8 @@ AutoGrader/
 │   └── config.toml                  # Streamlit theme configuration
 ├── docs/
 │   └── workflow.md                  # Detailed pipeline documentation
+├── scripts/
+│   └── dev_generate_sample_excel.py # Dev utility: generate sample Excel preview report
 ├── tests/
 │   └── test_autograder.py           # Test suite (pytest)
 ├── utils/                           # Shared utilities
@@ -100,7 +102,7 @@ The Streamlit interface (`app.py`) provides a browser-based alternative to the C
 2. **Rubric** — Auto-detects template, generates rubric via LLM, or lets you paste/edit manually; review, edit, or approve
 3. **Answer Key** — Provide manually, upload a file, or generate via LLM
 4. **Grade** — Runs concurrent grading + plagiarism detection with a live progress bar
-5. **Results** — View a summary table (no feedback column), download the Excel report, and see "Class Insights" (top 3 mistakes)
+5. **Results** — View summary metric cards, score distribution and criterion-average charts, apply manual score overrides in the UI, then download the updated Excel report and review "Class Insights" (top 3 mistakes)
 
 The UI calls the same underlying skill modules as the CLI — no logic is duplicated.
 

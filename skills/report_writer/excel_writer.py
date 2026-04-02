@@ -405,7 +405,7 @@ def write_results(
     insights = generate_class_insights(results)
     if insights:
         _write_insights_section(ws_stats, last_row, insights)
-        _auto_width(ws_stats)
+    _auto_width(ws_stats)
 
     # Atomic write — save to temp file first, then rename
     # Prevents corrupted output if process is killed mid-write
