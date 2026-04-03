@@ -5,17 +5,17 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 ## What It Does
 
 - Accepts a **ZIP of student submissions** + an **assignment brief**
-- Generates a **structured grading rubric** via LLM (Groq / Gemini) as validated JSON with per-criterion scoring — uses **rubric templates** when a matching assignment type is detected, human approval required
+- **Generates a structured grading rubric** via LLM (Groq / Gemini) — supports auto-detection from templates or **automatic AI-formatting of pasted text** (pasted raw rubrics are converted to JSON instantly)
 - Lets you provide or generate an **answer key/solution** (manual, file upload, or LLM-generated) for accurate grading
 - **Grades each submission** against the rubric — LLM evaluates each criterion and provides a score with a brief reason; **all math is done by Python** (totals, deduction amounts, deduction text formatting, score capping)
-- **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram)
+- **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram) — can be toggled on/off in the sidebar
 - Outputs a styled **Excel report** with per-criterion breakdown, class statistics, and class insights (top 3 common mistakes)
 
 ## Demo
 
 Below is a demo of the AutoGrader Streamlit UI in action:
 
-![Demo of AutoGrader UI](demo.gif)
+![Demo of AutoGrader UI](demo.mp4)
 
 ## Project Structure
 
@@ -29,7 +29,7 @@ AutoGrader/
 ├── .env.example                     # Environment variable template
 ├── README.md                        # This file
 ├── LICENSE                          # MIT License
-├── demo.gif                         # UI Demonstration
+├── demo.mp4                         # UI Demonstration
 ├── .streamlit/
 │   └── config.toml                  # Streamlit theme configuration
 ├── docs/
@@ -99,9 +99,9 @@ streamlit run app.py
 The Streamlit interface (`app.py`) provides a browser-based alternative to the CLI with a guided 5-step workflow:
 
 1. **Upload** — Drag-and-drop your submissions ZIP and assignment brief
-2. **Rubric** — Auto-detects template, generates rubric via LLM, or lets you paste/edit manually; review, edit, or approve
+2. **Rubric** — Auto-detects template, generates rubric via LLM, or lets you paste raw text which is **automatically formatted into JSON** upon entry
 3. **Answer Key** — Provide manually, upload a file, or generate via LLM
-4. **Grade** — Runs concurrent grading + plagiarism detection with a live progress bar
+4. **Grade** — Runs concurrent grading + plagiarism detection (controllable via a **sidebar toggle**) with a live progress bar
 5. **Results** — View summary metric cards, score distribution and criterion-average charts, apply manual score overrides in the UI, then download the updated Excel report and review "Class Insights" (top 3 mistakes)
 
 The UI calls the same underlying skill modules as the CLI — no logic is duplicated.

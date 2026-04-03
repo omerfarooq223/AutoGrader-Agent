@@ -32,9 +32,10 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
     ]
   }
   ```
+- **Manual Rubric (Auto-Formatting)**: If the user provides a rubric manually, the system automatically detects if it is raw text (PDF paste, CSV, etc.) and uses the LLM to format it into the required JSON structure. This happens automatically when the user finishes pasting and clicks away.
 - The output is validated via `_parse_rubric_json()` — invalid JSON or missing fields triggers an automatic retry.
-- The user reviews the rubric and chooses to **Approve**, **Edit**, or **Regenerate**.
-- The approved rubric is saved atomically to `.rubric_cache.json` for reuse. The filename is configurable via `RUBRIC_CACHE_FILENAME` environment variable.
+- The user reviews the rubric and chooses to **Approve**. Large-scale edits can be made directly in the JSON or raw text before approval.
+- The approved rubric is saved atomically to `.rubric_cache.json` for reuse.
 - The LLM used for rubric generation is **Groq llama-3.1-8b-instant** (primary). Gemini is a regional fallback — unavailable in Pakistan.
 
 ### Step 4: Answer Key (Optional)
@@ -75,14 +76,15 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - **Error submissions**: Files that could not be read (too large, corrupt, permission error) receive a clear error string as their content. These are graded with an "Error" mark — not silently passed through the LLM with garbage input.
 
 ### Step 7: Plagiarism Detection
+- **Toggleable**: This step can be disabled via the "Enable Plagiarism Analysis" toggle in the sidebar. If disabled, similarity scoring is skipped entirely to save time.
 - **Error and skipped submissions are excluded** from plagiarism analysis — identical error placeholder strings would generate false flags between all unreadable files.
 - **Minimum content guard**: Submissions under 200 characters are excluded — too short for reliable similarity scoring.
 - Remaining pairs are compared using:
-  1. **TF-IDF Cosine Similarity** — vocabulary overlap (note: English stop words removed, which helps essays but may reduce sensitivity for code submissions where keywords like `for`, `in`, `if` are meaningful)
-  2. **Character 4-gram Jaccard** — structural overlap, catches copy-paste even after variable renaming
+  1. **TF-IDF Cosine Similarity** — vocabulary overlap
+  2. **Character 4-gram Jaccard** — structural overlap
 - Combined score: `0.6 × cosine + 0.4 × n-gram`
 - Pairs scoring ≥ 65% similarity are flagged.
-- **Flags preserve student names**: the plagiarism flag for each student lists exactly who they matched and at what percentage (e.g. `⚠️ Similar to: ali.pdf (96%), sara.docx (88%)`). Teachers can immediately see who copied from whom.
+- **Flags preserve student names**: the plagiarism flag for each student lists exactly who they matched and at what percentage (e.g. `⚠️ Similar to: ali.pdf (96%), sara.docx (88%)`).
 - Uses `cache_key` for matching — works correctly even when multiple students submitted files with identical filenames.
 - No API calls — runs entirely locally using scikit-learn.
 

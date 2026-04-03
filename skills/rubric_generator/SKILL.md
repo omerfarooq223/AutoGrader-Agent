@@ -1,7 +1,5 @@
-# Rubric Generator — Skill Instructions
-
 ## Purpose
-Reads an assignment brief and generates a structured grading rubric using the Groq API (LLaMA 3.3 70B). Automatically selects a rubric template from `rubrics/` when the brief matches a known assignment type, otherwise generates from scratch.
+Reads an assignment brief and generates a structured grading rubric using the Groq API (LLaMA 3.3 70B). Automatically selects a rubric template from `rubrics/` when the brief matches a known assignment type, or **automatically formats raw pasted text** into the required JSON structure.
 
 ## When to Invoke
 - At the start of every grading run, after the assignment brief is loaded.
@@ -54,6 +52,7 @@ The LLM is forced to produce valid JSON matching this exact structure:
 ## Key Functions
 - `_load_templates()` — reads all JSON templates from `rubrics/`
 - `_match_template(brief_text)` — keyword matching to select the best template (≥2 hits required)
+- `format_rubric_to_json(rubric_text)` — AI-powered parser that converts raw text/CSV into a structured JSON rubric without changing wording
 - `_parse_rubric_json(raw)` — validates LLM output matches the required JSON schema
 - `generate_rubric(brief_text)` — template-aware LLM call with retry + schema validation
 - `approve_rubric(rubric)` — interactive approval loop

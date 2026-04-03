@@ -5,6 +5,7 @@ Detects potential plagiarism between student submissions using dual similarity a
 
 ## When to Invoke
 - After all submissions have been graded, before generating the Excel report.
+- **Skipped** if the Plagiarism Analysis toggle is disabled in the UI.
 
 ## Inputs
 | Input | Type | Source |

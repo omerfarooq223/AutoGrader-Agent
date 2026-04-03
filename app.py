@@ -49,6 +49,7 @@ _DEFAULTS = {
     "grading_in_progress": False,
     "rubric_key_v": 0,
     "lms_meta": {},
+    "plagiarism_enabled": True,
 }
 
 for k, v in _DEFAULTS.items():
@@ -396,8 +397,9 @@ with st.sidebar:
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 1px;
-        padding: 0rem 1.2rem 0.35rem 1.2rem;
-        margin: 0;
+        padding: 0rem 0 0.35rem 0;
+        margin: -0.5rem 0 0 0;
+        text-align: center;
         flex-shrink: 0;
     }
 
@@ -425,12 +427,24 @@ with st.sidebar:
     .vstp-wrap::before {
         content: "";
         position: absolute;
-        left: calc(1.2rem + 11px);   /* 1.2rem sidebar padding + half of 24px dot */
-        top: 0;
-        bottom: 0;
+        left: calc(1.2rem + 11px);
+        top: 10%;    /* Matches center of Row 1 (H/10) */
+        bottom: 10%; /* Matches center of Row 5 (H - H/10) */
         width: 2px;
         background: #1e293b;
         z-index: 0;
+    }
+
+    /* ── Animated progress fill ── */
+    .vstp-progress-fill {
+        position: absolute;
+        left: calc(1.2rem + 11px);
+        top: 10%;
+        width: 2px;
+        background: linear-gradient(180deg, #3b82f6 0%, #22c55e 100%);
+        box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+        z-index: 1;
+        transition: height 0.6s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     /* ── Each step row ── */
@@ -542,10 +556,12 @@ with st.sidebar:
             </div>
         </div>"""
 
+    _fill_height = f"{max(0, (active_step - 1) * 20)}%"
     st.markdown(f"""
         <p class="vstp-title">Progress</p>
         <div class="vstp-outer">
             <div class="vstp-wrap">
+                <div class="vstp-progress-fill" style="height: {_fill_height};"></div>
                 {_steps_html}
             </div>
             <div style="flex: 1 1 auto;"></div>
@@ -596,11 +612,34 @@ if zip_file and brief_file:
                 "</span>",
                 unsafe_allow_html=True,
             )
+            def handle_rubric_change():
+                """Automatically formats raw text into JSON when pasted."""
+                raw_text = st.session_state.get(f"rubric_manual_textarea_{st.session_state.rubric_key_v}", "").strip()
+                if not raw_text:
+                    return
+                # If it's already JSON, don't format it.
+                try:
+                    json.loads(raw_text)
+                    return
+                except json.JSONDecodeError:
+                    pass
+                
+                from skills.rubric_generator.rubric_agent import format_rubric_to_json
+                with st.spinner("Wait... Automatically Formatting your Rubric into a structured format..."):
+                    try:
+                        formatted = format_rubric_to_json(raw_text)
+                        st.session_state.rubric_manual_text = formatted
+                        st.session_state.rubric_key_v += 1
+                        st.toast("Rubric formatted automatically! ✓", icon="📝")
+                    except Exception as e:
+                        st.error(f"Automatic formatting failed: {e}")
+
             st.session_state.rubric_manual_text = st.text_area(
                 "Paste your rubric (any format):",
                 value=st.session_state.rubric_manual_text,
                 height=220,
                 key=f"rubric_manual_textarea_{st.session_state.rubric_key_v}",
+                on_change=handle_rubric_change,
             )
 
             if st.session_state.rubric_manual_text.strip():
@@ -622,50 +661,8 @@ if zip_file and brief_file:
                     else:
                         st.caption("JSON parsed but no criteria found — check structure.")
                 except json.JSONDecodeError:
-                    st.caption("Not valid JSON yet — paste JSON directly or use Format button below.")
-                    if not st.session_state.rubric_refined:
-                        if st.button("Format as JSON / Table", help="Converts your raw text into a structured table without changing the wording."):
-                            from skills.rubric_generator.rubric_agent import format_rubric_to_json
-                            with st.spinner("Formatting rubric…"):
-                                st.session_state.rubric_refined_text = format_rubric_to_json(
-                                    st.session_state.rubric_manual_text
-                                )
-                            st.session_state.rubric_refined = True
-                            st.session_state.rubric_refine_view = True
-                            st.rerun()
-
-                if st.session_state.rubric_refined and st.session_state.rubric_refine_view:
-                    st.markdown("#### Compare Rubric Versions")
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.markdown("**Your original**")
-                        st.code(st.session_state.rubric_manual_text, language="text")
-                    with c2:
-                        st.markdown("**AI formatted**")
-                        try:
-                            from skills.rubric_generator.rubric_agent import _parse_rubric_json
-                            refined_obj = _parse_rubric_json(st.session_state.rubric_refined_text)
-                            rubric_md = "| Criterion | Max Score | Description |\n|---|---|---|\n"
-                            for c in refined_obj.get("criteria", []):
-                                rubric_md += (
-                                    f"| {c.get('name','')} "
-                                    f"| {c.get('max_score','')} "
-                                    f"| {c.get('description','')} |\n"
-                                )
-                            st.markdown(rubric_md)
-                        except Exception:
-                            st.code(st.session_state.rubric_refined_text, language="text")
-                    btn1, btn2 = st.columns(2)
-                    with btn1:
-                        if st.button("Use formatted version", key="use_refined"):
-                            st.session_state.rubric_manual_text = st.session_state.rubric_refined_text
-                            st.session_state.rubric_key_v += 1
-                            st.session_state.rubric_refine_view = False
-                            st.rerun()
-                    with btn2:
-                        if st.button("Keep my original", key="keep_original"):
-                            st.session_state.rubric_refine_view = False
-                            st.rerun()
+                    st.caption("Not valid JSON yet — AI will format it once you click away or press Enter.")
+                    # Legacy Format button removed as requested.
 
                 if not st.session_state.rubric_approved:
                     if st.button("Approve rubric", key="approve_manual_rubric"):
@@ -906,11 +903,18 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
             st.session_state.grading_in_progress = False
             st.rerun()
 
-    c1, c2 = st.columns([2, 8])
+    c1, c2 = st.columns([2, 5])
     with c1:
         start_btn = st.button(
             "Start Grading",
             width="stretch",
+            disabled=st.session_state.grading_in_progress,
+        )
+    with c2:
+        st.session_state.plagiarism_enabled = st.toggle(
+            "Plagiarism Detection",
+            value=st.session_state.plagiarism_enabled,
+            help="Dual-similarity analysis (TF-IDF + N-Grams). Skip to save time.",
             disabled=st.session_state.grading_in_progress,
         )
 
@@ -979,9 +983,12 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
             )
             progress.progress(1.0, text="Grading complete.")
 
-            with st.spinner("Running plagiarism check…"):
-                flags = check_plagiarism(submissions, results)
-                results = apply_flags(results, flags)
+            if st.session_state.plagiarism_enabled:
+                with st.spinner("Running plagiarism check…"):
+                    flags = check_plagiarism(submissions, results)
+                    results = apply_flags(results, flags)
+            else:
+                st.info("Plagiarism analysis skipped (disabled in sidebar).")
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_xl:
                 report_path = tmp_xl.name
