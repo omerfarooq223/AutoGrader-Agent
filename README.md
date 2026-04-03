@@ -15,7 +15,8 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 
 Below is a demo of the AutoGrader Streamlit UI in action:
 
-![Demo of AutoGrader UI](demo.mp4)
+![Demo of AutoGrader UI](demo.gif)
+
 
 ## Project Structure
 
@@ -29,7 +30,7 @@ AutoGrader/
 ├── .env.example                     # Environment variable template
 ├── README.md                        # This file
 ├── LICENSE                          # MIT License
-├── demo.mp4                         # UI Demonstration
+├── demo.gif                         # UI Demonstration
 ├── .streamlit/
 │   └── config.toml                  # Streamlit theme configuration
 ├── docs/
