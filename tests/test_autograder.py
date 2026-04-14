@@ -73,6 +73,7 @@ from skills.file_extractor.extractor import (
     read_text_file,
     read_notebook,
     collect_submissions,
+    _infer_identity_for_group,
 )
 
 
@@ -149,6 +150,48 @@ class TestExtractor:
         assert "inside.py" in subs[0]["content"]
         assert "print('inner')" in subs[0]["content"]
 
+    def test_identity_priority_filename_over_folder_and_content(self, tmp_path):
+        folder = tmp_path / "Wrong Folder 999999"
+        folder.mkdir()
+        path = folder / "F2023376425 Muhammad Umar Farooq.py"
+        path.write_text("Name: Someone Else\nID: 111111\nprint('x')")
+
+        files = [{"filename": path.name, "path": str(path), "content": path.read_text()}]
+        identity = _infer_identity_for_group(files, str(tmp_path), {})
+
+        assert identity["id"] == "F2023376425"
+        assert identity["id_source"] == "filename"
+        assert identity["name"] == "Muhammad Umar Farooq"
+        assert identity["name_source"] == "filename"
+
+    def test_identity_falls_back_to_folder_then_content(self, tmp_path):
+        folder = tmp_path / "Jane Doe 7654321"
+        folder.mkdir()
+        path = folder / "submission.py"
+        path.write_text("Name: Alice Smith\nID: 123456\nprint('x')")
+
+        files = [{"filename": path.name, "path": str(path), "content": path.read_text()}]
+        identity = _infer_identity_for_group(files, str(tmp_path), {})
+
+        assert identity["name"] == "Jane Doe"
+        assert identity["name_source"] == "folder"
+        assert identity["id"] == "7654321"
+        assert identity["id_source"] == "folder"
+
+    def test_identity_uses_content_if_filename_and_folder_missing(self, tmp_path):
+        folder = tmp_path / "uploads"
+        folder.mkdir()
+        path = folder / "assignment.py"
+        path.write_text("Name: Bob Khan\nID: F202300001\nprint('x')")
+
+        files = [{"filename": path.name, "path": str(path), "content": path.read_text()}]
+        identity = _infer_identity_for_group(files, str(tmp_path), {})
+
+        assert identity["name"] == "Bob Khan"
+        assert identity["name_source"] == "content"
+        assert identity["id"] == "F202300001"
+        assert identity["id_source"] == "content"
+
 
 # ── Plagiarism tests ───────────────────────────────────────────
 
@@ -221,6 +264,17 @@ class TestGraderParsing:
         result = _parse_json("not json at all", "fallback.py")
         assert result["name"] == "fallback.py"
         assert result["marks"] == "Error"
+
+    def test_parse_json_uses_preferred_identity(self):
+        raw = '{"id": "NOT FOUND", "category_scores": {}}'
+        result = _parse_json(
+            raw,
+            "fallback.py",
+            preferred_name="Muhammad Umar Farooq",
+            preferred_id="F2023376425",
+        )
+        assert result["name"] == "Muhammad Umar Farooq"
+        assert result["id"] == "F2023376425"
 
 
 # ── Excel writer tests ─────────────────────────────────────────

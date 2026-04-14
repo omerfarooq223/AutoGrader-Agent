@@ -57,12 +57,16 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
   - **.ipynb**: Code cells, markdown cells, and **cell outputs** (print results, errors, return values) all extracted — output is critical for grading whether code actually ran correctly.
 - **Image extraction** (only when `EXTRACT_IMAGES=True`): Embedded images sent to Gemini Vision for description. Fails fast on quota exhaustion — never retries image description, so a dead Gemini quota does not freeze the pipeline.
 - `extract_and_collect` returns `(submissions, extract_dir)`. The caller is responsible for cleaning up `extract_dir` **after** grading completes, so the cache file survives for crash recovery during long grading sessions.
+- **Student identity extraction precedence** (name + ID) is deterministic and done before grading:
+  1. Parse from submission **filename** (highest priority).
+  2. If either is missing, parse from parent **folder name(s)**.
+  3. If still missing, parse from submission **document content**.
+  4. Final fallback for missing name only: LMS metadata when available.
 
 ### Step 6: Grading
 - Each submission + the structured JSON rubric (+ answer key if provided) is sent to **Groq llama-3.1-8b-instant**.
 - The model was switched from 3.3 70B to 3.1 8B Instant because: (a) 8B has ~5× higher free-tier TPM limit, (b) rubric-based grading against a provided answer key does not require strong open-ended reasoning — the LLM's job is comparison and scoring, not generation.
-- **Student name**: Extracted from the LMS folder structure by Python (`_parse_lms_path()`), not by the LLM. LLM extraction is a fallback only for non-LMS ZIP files.
-- **Student ID**: Extracted by the LLM from submission file content (simple pattern-matching task).
+- **Student name + ID**: The grader consumes pre-extracted identity metadata from extraction step (filename → folder → content precedence). LLM identity output is now fallback-only when extraction cannot infer values.
 - **LLM response**: The LLM returns per-criterion scores and brief reasons only: `{id, category_scores: {CritName: {score, reason}}}`. The LLM does NOT calculate totals, write `(-N)` amounts, or format deduction strings.
 - **Deterministic Python scoring** (all math done in Python, never by the LLM):
   1. Per-criterion cap: each score is capped to `max_score` from the rubric (never below 0).

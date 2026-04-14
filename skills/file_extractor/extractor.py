@@ -191,6 +191,140 @@ _READERS = {
 }
 
 
+_ID_TOKEN_RE = re.compile(r"\b([A-Za-z]{0,4}\d{5,}|\d{6,}|[A-Za-z]\d{4,})\b")
+_NAME_LABEL_RE = re.compile(
+    r"(?im)^\s*(?:student\s*)?name\s*[:#\-]\s*([A-Za-z][A-Za-z .'\-]{2,100})\s*$"
+)
+_ID_LABEL_RE = re.compile(
+    r"(?im)^\s*(?:student\s*)?(?:id|roll\s*no|registration\s*no|reg\s*no)\s*[:#\-]\s*([A-Za-z0-9\-_/]{4,})"
+)
+_NOISE_TOKENS = {
+    "assignment", "submission", "assignsubmission", "file", "student", "answer",
+    "solution", "final", "draft", "copy", "doc", "pdf", "python", "cpp",
+    "ipynb", "name", "id", "roll", "registration", "reg", "no", "class",
+    "section", "semester", "course", "project", "report", "lab",
+}
+
+
+def _normalize_name(name: str) -> str:
+    cleaned = re.sub(r"\s+", " ", name).strip(" _-.,")
+    if not cleaned:
+        return ""
+    words = []
+    for word in cleaned.split(" "):
+        if not word:
+            continue
+        if "'" in word:
+            words.append("'".join(part.capitalize() for part in word.split("'")))
+        else:
+            words.append(word.capitalize())
+    return " ".join(words)
+
+
+def _extract_id_from_text(text: str) -> str:
+    label_match = _ID_LABEL_RE.search(text)
+    if label_match:
+        return label_match.group(1).strip().upper()
+
+    token_match = _ID_TOKEN_RE.search(text)
+    if token_match:
+        return token_match.group(1).strip().upper()
+
+    return ""
+
+
+def _extract_name_from_text(text: str) -> str:
+    label_match = _NAME_LABEL_RE.search(text)
+    if label_match:
+        return _normalize_name(label_match.group(1))
+
+    collapsed = re.sub(r"[_\-]+", " ", text)
+    collapsed = re.sub(r"\b\d+\b", " ", collapsed)
+    collapsed = _ID_TOKEN_RE.sub(" ", collapsed)
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\.]{1,}", collapsed) if w.lower() not in _NOISE_TOKENS]
+
+    if len(words) < 2:
+        return ""
+
+    # Keep first plausible full name chunk (2-5 words).
+    candidate = " ".join(words[:5])
+    return _normalize_name(candidate)
+
+
+def _infer_identity_for_group(files: list[dict], base_dir: str, lms_meta: dict) -> dict:
+    """
+    Infer student name/id using strict priority:
+    1) Submission filename
+    2) Folder names
+    3) Document content
+    """
+    inferred_name = ""
+    inferred_id = ""
+    name_source = ""
+    id_source = ""
+
+    # 1) Prefer metadata in uploaded file name(s)
+    for item in files:
+        stem = Path(item["filename"]).stem
+        file_name = _extract_name_from_text(stem)
+        file_id = _extract_id_from_text(stem)
+        if file_name and not inferred_name:
+            inferred_name = file_name
+            name_source = "filename"
+        if file_id and not inferred_id:
+            inferred_id = file_id
+            id_source = "filename"
+        if inferred_name and inferred_id:
+            break
+
+    # 2) Fall back to folder names when filename is missing metadata
+    if not inferred_name or not inferred_id:
+        for item in files:
+            rel_parts = Path(os.path.relpath(item["path"], base_dir)).parts[:-1]
+            for folder_part in rel_parts:
+                folder_name = _extract_name_from_text(folder_part)
+                folder_id = _extract_id_from_text(folder_part)
+                if folder_name and not inferred_name:
+                    inferred_name = folder_name
+                    name_source = "folder"
+                if folder_id and not inferred_id:
+                    inferred_id = folder_id
+                    id_source = "folder"
+                if inferred_name and inferred_id:
+                    break
+            if inferred_name and inferred_id:
+                break
+
+    # 3) Last fallback: parse explicit labels from document content
+    if not inferred_name or not inferred_id:
+        for item in files:
+            content = item.get("content", "")
+            if not content or item.get("error"):
+                continue
+            preview = content[:15000]
+            content_name = _extract_name_from_text(preview)
+            content_id = _extract_id_from_text(preview)
+            if content_name and not inferred_name:
+                inferred_name = content_name
+                name_source = "content"
+            if content_id and not inferred_id:
+                inferred_id = content_id
+                id_source = "content"
+            if inferred_name and inferred_id:
+                break
+
+    if not inferred_name and lms_meta.get("student_name"):
+        inferred_name = lms_meta["student_name"]
+        name_source = "lms"
+
+    return {
+        "name": inferred_name,
+        "id": inferred_id,
+        "name_source": name_source,
+        "id_source": id_source,
+    }
+
+
 def read_file(file_path: str) -> str:
     """Read a single file based on its extension. Returns extracted text."""
     ext = Path(file_path).suffix.lower()
@@ -388,6 +522,7 @@ def collect_submissions(
         group = grouped[group_key]
         files = sorted(group["files"], key=lambda f: f["rel_path"].lower())
         lms_meta = group["lms_meta"]
+        identity_meta = _infer_identity_for_group(files, directory, lms_meta)
 
         combined_parts = []
         combined_error = None
@@ -402,7 +537,7 @@ def collect_submissions(
                 f"\n\n===== FILE: {item['rel_path']} =====\n{item['content']}"
             )
 
-        student_label = lms_meta.get("student_name") or group_key
+        student_label = identity_meta.get("name") or lms_meta.get("student_name") or group_key
         combined_filename = student_label  # Clean name — no suffix needed
         combined_content = "".join(combined_parts).strip()
 
@@ -424,6 +559,7 @@ def collect_submissions(
                 "content":      combined_content,
                 "cache_key":    cache_key,
                 "lms_meta":     lms_meta,
+                "identity_meta": identity_meta,
                 "source_files": [f["path"] for f in files],
                 **({"error": combined_error} if combined_error else {}),
             }

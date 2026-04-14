@@ -8,6 +8,7 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 - **Generates a structured grading rubric** via LLM (Groq / Gemini) — supports auto-detection from templates or **automatic AI-formatting of pasted text** (pasted raw rubrics are converted to JSON instantly)
 - Lets you provide or generate an **answer key/solution** (manual, file upload, or LLM-generated) for accurate grading
 - **Grades each submission** against the rubric — LLM evaluates each criterion and provides a score with a brief reason; **all math is done by Python** (totals, deduction amounts, deduction text formatting, score capping)
+- Resolves **student name and ID deterministically** with fallback order: **filename → folder name → document content**
 - **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram) — can be toggled on/off in the sidebar
 - Outputs a styled **Excel report** with per-criterion breakdown, class statistics, and class insights (top 3 common mistakes)
 

@@ -106,7 +106,13 @@ def _match_criterion_name(llm_name: str, rubric_names: list[str]) -> str | None:
     return None
 
 
-def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str = "") -> dict:
+def _parse_json(
+    raw: str,
+    fallback_name: str,
+    rubric: str = None,
+    preferred_name: str = "",
+    preferred_id: str = "",
+) -> dict:
     """
     Extract JSON from an LLM response, then apply deterministic Python
     logic to compute totals, cap scores, and build deduction text.
@@ -143,17 +149,17 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str 
                 pass
         if recovered is None:
             return {
-                "name":            lms_name or fallback_name,
-                "id":              fallback_name,
+                "name":            preferred_name or fallback_name,
+                "id":              preferred_id or fallback_name,
                 "marks":           "Error",
                 "deductions":      f"Could not parse LLM response: {raw[:300]}",
                 "category_scores": {},
             }
         result = recovered
 
-    # ── Name: prefer LMS folder name, then parsed name fallback ──
-    if lms_name:
-        result["name"] = lms_name
+    # ── Name: prefer extractor-verified identity, then parsed name fallback ──
+    if preferred_name:
+        result["name"] = preferred_name
     else:
         raw_name = result.get("name", "") or ""
         cleaned = re.sub(r'\.(docx?|pdf|py|cpp|ipynb|txt)$', '', raw_name, flags=re.IGNORECASE).strip()
@@ -161,9 +167,11 @@ def _parse_json(raw: str, fallback_name: str, rubric: str = None, lms_name: str 
         cleaned = re.sub(r'^[\s_\-\d]+|[\s_\-\d]+$', '', cleaned).strip()
         result["name"] = cleaned if cleaned else fallback_name
 
-    # ── ID: extract from content, use filename as fallback ──
-    raw_id = str(result.get("id", "")).strip()
-    if not raw_id or raw_id.lower() in ("n/a", "not found", "none", ""):
+    # ── ID: prefer extractor-verified identity, then LLM/content fallback ──
+    raw_id = str(result.get("id", "")).strip().upper()
+    if preferred_id:
+        result["id"] = preferred_id
+    elif not raw_id or raw_id.lower() in ("n/a", "not found", "none", ""):
         result["id"] = fallback_name
     else:
         result["id"] = raw_id
@@ -305,12 +313,13 @@ def grade_submission(
     filename: str,
     answer_key: str = None,
     cancel_event: threading.Event = None,
-    lms_name: str = "",
+    preferred_name: str = "",
+    preferred_id: str = "",
 ) -> dict:
     """
     Grade a single student submission with retry logic.
     If answer_key is provided, the LLM compares the submission to it.
-    If lms_name is provided, it overrides LLM name extraction.
+    If preferred_name/preferred_id are provided, they override LLM extraction.
     """
     # Build allowed scores note from rubric bands — forces discrete grading
     def _build_allowed_scores(rubric_str: str) -> str:
@@ -363,8 +372,8 @@ def grade_submission(
     # return a clean error instead of sending empty content to the grader.
     if not submission_for_llm or len(submission_for_llm.strip()) < 50:
         return {
-            "name":            lms_name or filename,
-            "id":              filename,
+            "name":            preferred_name or filename,
+            "id":              preferred_id or filename,
             "marks":           "Error",
             "category_scores": {},
             "deductions":      "[No readable text found — likely a scanned image. Enable EXTRACT_IMAGES=True or convert to searchable PDF.]",
@@ -377,7 +386,13 @@ def grade_submission(
         cancel_event=cancel_event,
         max_tokens=GRADING_MAX_OUTPUT_TOKENS,
     )
-    return _parse_json(raw, filename, rubric=rubric, lms_name=lms_name)
+    return _parse_json(
+        raw,
+        filename,
+        rubric=rubric,
+        preferred_name=preferred_name,
+        preferred_id=preferred_id,
+    )
 
 
 def grade_all(
@@ -439,14 +454,20 @@ def grade_all(
         
         time.sleep(base_sleep)
         
-        lms_name = sub.get("lms_meta", {}).get("student_name", "")
+        identity_meta = sub.get("identity_meta", {})
+        preferred_name = (
+            identity_meta.get("name")
+            or sub.get("lms_meta", {}).get("student_name", "")
+        )
+        preferred_id = identity_meta.get("id", "")
         result = grade_submission(
             rubric,
             sub["content"],
             sub["filename"],
             answer_key=answer_key,
             cancel_event=cancel_event,
-            lms_name=lms_name,
+            preferred_name=preferred_name,
+            preferred_id=preferred_id,
         )
         result["filename"] = sub["filename"]
         result["cache_key"] = sub.get("cache_key", sub["filename"])
@@ -463,8 +484,8 @@ def grade_all(
             except Exception as exc:
                 logger.error("Failed to grade %s: %s", sub["filename"], exc)
                 result = {
-                    "name":            sub.get("lms_meta", {}).get("student_name") or sub["filename"],
-                    "id":              "N/A",
+                    "name":            sub.get("identity_meta", {}).get("name") or sub.get("lms_meta", {}).get("student_name") or sub["filename"],
+                    "id":              sub.get("identity_meta", {}).get("id") or "N/A",
                     "marks":           "Error",
                     "category_scores": {},
                     "deductions":      f"Grading failed: {exc}",
