@@ -79,6 +79,14 @@ AutoGrader/
 
 Embedded images in PDF and DOCX files can be automatically extracted and sent to Gemini's vision model for description by enabling `EXTRACT_IMAGES=True` in your `.env`. Each description is appended to the document text as `[Image: <description>]`, giving the grading LLM full visibility into diagrams, charts, code output screenshots, and handwritten content. If the vision API fails for any image, it is skipped silently — extraction never crashes.
 
+## Limitations
+
+When evaluating very large assignments or bulk processing dozens of submissions at once, you may experience connection limits or timeouts with the default APIs:
+- **Free API Tiers (e.g., Groq)**: Free tiers often fail due to strict token rate limits or context window restrictions when feeding massive code blocks or theory text into the LLM. For large assignments, upgrading to a **Paid API** (like OpenAI GPT-4o or Anthropic Claude 3.5) with higher rate limits is strongly advised.
+- **Local Models (e.g., Ollama)**: Attempting to bypass API limits by using local models via Ollama will solve rate-limiting but introduces significant overhead. Local inference on huge text inputs requires an extremely long processing time and can frequently lead to API connection timeouts or system resource exhaustion, unless running on enterprise-grade hardware.
+
+> **Agentic IDE Workaround**: If you run into these API limitations, you can use any advanced AI IDE (Cursor, GitHub Copilot, Antigravity, etc.) to evaluate the assignments autonomously. Just point the IDE's agent to `docs/workflow.md` and provide it the file paths of your submissions, assignment brief, rubric, and answer key. The agent can then use the workflow rules to grade the files locally and generate the finalized Excel report for you manually.
+
 ## Quick Start
 
 ```bash

@@ -11,6 +11,7 @@ Production hardening:
 
 import logging
 
+from typing import Union, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -47,7 +48,7 @@ def _ngram_jaccard(text_a: str, text_b: str, n: int = 4) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
-def check_plagiarism(submissions: list[dict], results: list[dict] | None = None) -> dict[str, list[str]]:
+def check_plagiarism(submissions: list, results: Optional[list] = None) -> dict:
     """
     Compare all submission pairs using a combined similarity score:
       combined = 0.6 * cosine_similarity + 0.4 * ngram_jaccard

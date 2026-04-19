@@ -380,6 +380,8 @@ def _write_insights_section(ws, start_row: int, insights: list[str]) -> None:
         ws.cell(row=row, column=2, value=insight).border  = _THIN_BORDER
 
 
+from typing import Union
+
 def write_results(
     results: list[dict],
     output_path: str = "results.xlsx",
@@ -387,7 +389,7 @@ def write_results(
     assignment_name: str = "",
     course_code: str = "",
     semester: str = "",
-) -> str | tuple[str, list[str]]:
+) -> Union[str, tuple[str, list[str]]]:
     """
     Write grading results to an Excel file with two sheets:
       1. Grading Report   — per-student results (no Feedback column)
