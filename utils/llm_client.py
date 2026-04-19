@@ -61,7 +61,6 @@ def _call_gemini(
     client = genai.Client(api_key=api_key)
     import config
     selected_model = model_name or config.GEMINI_MODEL
-    print(f"DEBUG: Calling Gemini with model='{selected_model}'")
     logger.info("Calling Gemini with model: %s", selected_model)
     
     response = client.models.generate_content(
@@ -77,6 +76,47 @@ def _call_gemini(
 
 
 
+# ── Circuit breaker state ──────────────────────────────────────────
+_provider_failure_counts = {"groq": 0, "gemini": 0}
+_provider_circuit_open = {"groq": False, "gemini": False}
+CIRCUIT_BREAKER_THRESHOLD = 3  # Open circuit after 3 consecutive failures
+
+
+def _check_quota_exhausted(error_msg: str) -> bool:
+    """Check if error indicates permanent quota exhaustion."""
+    error_lower = error_msg.lower()
+    return (
+        "limit: 0" in error_msg or
+        "quota" in error_lower or
+        "daily" in error_lower or
+        "permanently" in error_lower
+    )
+
+
+def _should_skip_provider(provider: str) -> bool:
+    """Check if provider should be skipped due to circuit breaker."""
+    if _provider_circuit_open.get(provider, False):
+        logger.warning("Circuit breaker OPEN for %s — skipping provider.", provider.upper())
+        return True
+    return False
+
+
+def _record_failure(provider: str):
+    """Record a provider failure and potentially open circuit breaker."""
+    _provider_failure_counts[provider] = _provider_failure_counts.get(provider, 0) + 1
+    if _provider_failure_counts[provider] >= CIRCUIT_BREAKER_THRESHOLD:
+        _provider_circuit_open[provider] = True
+        logger.error(
+            "Circuit breaker OPENED for %s after %d failures.",
+            provider.upper(), CIRCUIT_BREAKER_THRESHOLD
+        )
+
+
+def _record_success(provider: str):
+    """Reset failure counter on success."""
+    _provider_failure_counts[provider] = 0
+
+
 # ── Unified entry point ──────────────────────────────────────────
 def call_llm(
     system_prompt: str,
@@ -85,57 +125,76 @@ def call_llm(
     max_tokens: int = 2048,
 ) -> str:
     import config
+    import re
+    import time
+    
     groq_model = model or config.MODEL
     gemini_models = [config.GEMINI_MODEL, "gemini-2.0-flash", "gemini-flash-latest"]
     
-    # Try Groq first — it's proven reliable and fast in this region
-    try:
-        if not os.environ.get("GROQ_API_KEY"):
-            logger.warning("GROQ_API_KEY missing from environment — skipping Groq.")
-            raise EnvironmentError("GROQ_API_KEY not set.")
-            
-        logger.warning("DEBUG: Trying Groq with model '%s'…", groq_model)
-        result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
-        logger.info("Groq succeeded with model: %s", groq_model)
-        return result
-    except Exception as groq_err:
-        err_msg = str(groq_err)
-        logger.warning("DEBUG: Groq Failed: %s", err_msg[:200])
-        if "429" in err_msg or "rate_limit" in err_msg.lower():
-           import re, time
-           match = re.search(r'retry in ([\d\.]+)s', err_msg)
-           wait = float(match.group(1)) + 1.0 if match else 60.0
-           logger.warning("Groq rate limit hit. Waiting %.1fs and retrying Groq...", wait)
-           time.sleep(wait)
-           return _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
-        else:
-            logger.warning("Groq failed, trying Gemini fallbacks: %s", groq_err)
-        last_error = groq_err
-
-    # Gemini fallbacks — skip entirely if daily quota is known dead
-    # "limit: 0" in error means daily cap hit, not per-minute — no point retrying
-    if "limit: 0" in str(last_error):
-        logger.warning("Gemini daily quota exhausted — skipping all Gemini fallbacks.")
-        raise RuntimeError(
-            f"Groq failed and Gemini daily quota is exhausted.\n"
-            f"Groq Error: {last_error}\n"
-            "Wait until tomorrow for Gemini quota reset, or upgrade Gemini plan."
-        )
-
-    # Gemini fallbacks
-    for gem_model in gemini_models:
+    last_error = None
+    
+    # Try Groq first — it's proven reliable and fast
+    if not _should_skip_provider("groq"):
         try:
-            logger.warning("DEBUG: Trying Gemini fallback with model '%s'…", gem_model)
-            result = _call_gemini(system_prompt, user_prompt, max_tokens, model_name=gem_model)
-            logger.info("Gemini fallback succeeded with model: %s", gem_model)
-            return result
-        except Exception as gemini_err:
-            logger.warning("DEBUG: Gemini fallback '%s' Failed: %s", gem_model, str(gemini_err)[:200])
-            logger.debug("Gemini fallback %s failed: %s", gem_model, gemini_err)
-            continue
-
-    raise RuntimeError(
-        f"All LLM providers failed.\n"
-        f"Groq Error: {last_error}\n"
-        "Gemini models also exceeded quota or were unavailable."
-    )
+            if not os.environ.get("GROQ_API_KEY"):
+                logger.warning("GROQ_API_KEY missing — skipping Groq.")
+            else:
+                logger.info("Attempting Groq with model: %s", groq_model)
+                result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
+                _record_success("groq")
+                logger.info("✓ Groq succeeded")
+                return result
+        except Exception as groq_err:
+            err_msg = str(groq_err)
+            last_error = groq_err
+            
+            # Check for quota exhaustion
+            if _check_quota_exhausted(err_msg):
+                _record_failure("groq")
+                logger.error("Groq quota exhausted: %s", err_msg[:200])
+            # Check for rate limit with retry backoff
+            elif "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg.upper():
+                logger.warning("Groq rate limit hit: %s", err_msg[:200])
+                match = re.search(r'retry in ([\d\.]+)s', err_msg)
+                if match:
+                    wait = float(match.group(1)) + 1.0
+                    logger.warning("Groq requested wait: %.1fs. Retrying once...", wait)
+                    time.sleep(wait)
+                    try:
+                        result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
+                        _record_success("groq")
+                        logger.info("✓ Groq succeeded after retry")
+                        return result
+                    except Exception as retry_err:
+                        logger.warning("Groq retry failed: %s", retry_err)
+                        last_error = retry_err
+            else:
+                logger.warning("Groq failed: %s", err_msg[:200])
+                _record_failure("groq")
+    
+    # Gemini fallbacks — only try if not circuit-broken
+    if not _should_skip_provider("gemini"):
+        for gem_model in gemini_models:
+            try:
+                logger.info("Attempting Gemini fallback with model: %s", gem_model)
+                result = _call_gemini(system_prompt, user_prompt, max_tokens, model_name=gem_model)
+                _record_success("gemini")
+                logger.info("✓ Gemini succeeded with model: %s", gem_model)
+                return result
+            except Exception as gemini_err:
+                err_msg = str(gemini_err)
+                logger.warning("Gemini %s failed: %s", gem_model, err_msg[:200])
+                last_error = gemini_err
+                
+                if _check_quota_exhausted(err_msg):
+                    _record_failure("gemini")
+                    logger.error("Gemini quota exhausted, skipping remaining models.")
+                    break  # Skip other Gemini models
+    
+    # All providers failed
+    error_summary = f"All LLM providers failed (Groq circuit: {_provider_circuit_open.get('groq')}, Gemini circuit: {_provider_circuit_open.get('gemini')})"
+    logger.error(error_summary)
+    if last_error:
+        raise RuntimeError(f"{error_summary}\nLast error: {last_error}")
+    else:
+        raise RuntimeError(error_summary)

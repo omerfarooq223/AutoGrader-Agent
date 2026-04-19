@@ -32,9 +32,10 @@ MAX_RETRIES: int = int(os.environ.get("MAX_RETRIES", "3"))
 TOTAL_MARKS: int = int(os.environ.get("TOTAL_MARKS", "100"))
 PASS_THRESHOLD: int = int(os.environ.get("PASS_THRESHOLD", "50"))
 GRADING_MAX_OUTPUT_TOKENS: int = int(os.environ.get("GRADING_MAX_OUTPUT_TOKENS", "768"))
+# Note: Set to 0 to disable truncation and send full content to LLM
 MAX_SUBMISSION_CHARS: int = int(os.environ.get("MAX_SUBMISSION_CHARS", "0"))
 MAX_ANSWER_KEY_CHARS: int = int(os.environ.get("MAX_ANSWER_KEY_CHARS", "0"))
-MAX_RUBRIC_CHARS: int = int(os.environ.get("MAX_RUBRIC_CHARS", "9000"))
+MAX_RUBRIC_CHARS: int = int(os.environ.get("MAX_RUBRIC_CHARS", "0"))
 
 # ── Plagiarism ──────────────────────────────────────────────────
 SIMILARITY_THRESHOLD: float = float(os.environ.get("SIMILARITY_THRESHOLD", "0.65"))

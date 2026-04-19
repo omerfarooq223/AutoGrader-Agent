@@ -30,29 +30,6 @@ from utils.llm_client import call_llm
 logger = logging.getLogger(__name__)
 
 
-def _trim_text(text: str, max_chars: int, label: str) -> str:
-    """
-    Trim long prompt sections to reduce token spend on free-tier plans.
-    Keeps both head and tail because conclusions often appear at the end.
-    """
-    # max_chars <= 0 disables truncation.
-    if max_chars <= 0:
-        return text
-    if not text or len(text) <= max_chars:
-        return text
-    if max_chars < 200:
-        return text[:max_chars]
-    head = int(max_chars * 0.7)
-    tail = max_chars - head
-    return (
-        f"{text[:head]}\n\n"
-        f"[{label} truncated to save tokens. {len(text) - max_chars} chars omitted.]\n\n"
-        f"{text[-tail:]}"
-    )
-
-
-
-
 def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> str:
     """Make a single Groq chat completion call."""
     return call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
@@ -106,6 +83,45 @@ def _match_criterion_name(llm_name: str, rubric_names: list[str]) -> str | None:
     return None
 
 
+def _validate_json_structure(obj: dict, rubric: str | None) -> tuple[bool, str]:
+    """
+    Validate LLM response JSON structure.
+    Returns (is_valid, error_message).
+    """
+    if not isinstance(obj, dict):
+        return False, "Response is not a JSON object"
+    
+    if "category_scores" not in obj or not isinstance(obj["category_scores"], dict):
+        return False, "Missing or invalid 'category_scores' field"
+    
+    max_scores = _build_rubric_maxes(rubric)
+    rubric_names = set(max_scores.keys())
+    
+    # Only check for empty category_scores if we have a rubric
+    # If no rubric, we can't validate, so allow it
+    if rubric and not obj["category_scores"]:
+        return False, "category_scores is empty — LLM returned no scores"
+    
+    # Validate scores are numeric or have score field
+    for k, v in obj["category_scores"].items():
+        if isinstance(v, dict):
+            if "score" not in v:
+                return False, f"Criterion '{k}' missing 'score' field"
+            try:
+                float(v["score"])
+            except (ValueError, TypeError):
+                return False, f"Criterion '{k}' score is not numeric: {v['score']}"
+        elif isinstance(v, (int, float)):
+            try:
+                float(v)
+            except (ValueError, TypeError):
+                return False, f"Criterion '{k}' score is not numeric: {v}"
+        else:
+            return False, f"Criterion '{k}' has invalid value type: {type(v)}"
+    
+    return True, ""
+
+
 def _parse_json(
     raw: str,
     fallback_name: str,
@@ -128,10 +144,18 @@ def _parse_json(
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
+    result = None
+    parse_error = None
+    
+    # Step 1: Try direct JSON parsing
     try:
         result = json.loads(text)
-    except json.JSONDecodeError:
-        # Try brace-matching to extract partial JSON
+    except json.JSONDecodeError as e:
+        parse_error = str(e)
+        logger.warning("Direct JSON parse failed: %s", parse_error)
+    
+    # Step 2: Try brace-matching to extract partial JSON
+    if result is None:
         start = text.find("{")
         recovered = None
         if start != -1:
@@ -145,17 +169,33 @@ def _parse_json(
                         break
             try:
                 recovered = json.loads(text[start:end + 1])
-            except Exception:
-                pass
-        if recovered is None:
-            return {
-                "name":            preferred_name or fallback_name,
-                "id":              preferred_id or fallback_name,
-                "marks":           "Error",
-                "deductions":      f"Could not parse LLM response: {raw[:300]}",
-                "category_scores": {},
-            }
-        result = recovered
+                result = recovered
+                logger.info("Recovered partial JSON via brace-matching")
+            except Exception as e:
+                logger.warning("Brace-matching failed: %s", e)
+                parse_error = str(e)
+    
+    # Step 3: Validate structure if we have a result
+    if result is not None:
+        is_valid, validation_error = _validate_json_structure(result, rubric)
+        if not is_valid:
+            logger.warning("JSON structure validation failed: %s", validation_error)
+            result = None  # Force error return
+    
+    # Step 4: If all parsing failed, return structured error
+    if result is None:
+        error_msg = parse_error or "Unknown parsing error"
+        logger.error(
+            "Could not parse LLM response. Error: %s. Raw response: %s",
+            error_msg, raw[:500]
+        )
+        return {
+            "name":            preferred_name or fallback_name,
+            "id":              preferred_id or fallback_name,
+            "marks":           "Error",
+            "deductions":      f"[LLM Response Parsing Error: {error_msg}]",
+            "category_scores": {},
+        }
 
     # ── Name: prefer extractor-verified identity, then parsed name fallback ──
     if preferred_name:
@@ -208,11 +248,20 @@ def _parse_json(
         cat_reasons[canonical_name] = reason.strip()
 
     # Validate: ensure ALL rubric criteria have scores — fill missing with 0
+    omitted_criteria = []
     for rubric_crit, rubric_max in max_scores.items():
         if rubric_crit not in cat_scores:
             cat_scores[rubric_crit] = 0.0
             cat_reasons[rubric_crit] = "criterion not evaluated by grader"
-            logger.warning("LLM omitted criterion '%s' — assigning 0.", rubric_crit)
+            omitted_criteria.append(rubric_crit)
+            logger.error("CRITICAL: LLM omitted criterion '%s' — assigning 0 (max: %s). This submission may be under-graded.", rubric_crit, rubric_max)
+    
+    if omitted_criteria:
+        logger.error(
+            "WARNING: Submission '%s' has %d omitted criteria: %s. "
+            "Consider regenerating the rubric or retrying grading.",
+            fallback_name, len(omitted_criteria), ", ".join(omitted_criteria)
+        )
 
     # Backfill reasons from legacy deductions text for cached older results.
     if not any(cat_reasons.values()):
@@ -345,32 +394,27 @@ def grade_submission(
 
     if answer_key:
         logger.info("Answer key present — length %d chars", len(answer_key))
-        rubric_text = _trim_text(rubric, MAX_RUBRIC_CHARS, "Rubric")
-        answer_key_text = _trim_text(answer_key, MAX_ANSWER_KEY_CHARS, "Answer key")
-        submission_for_llm = _trim_text(submission_text, MAX_SUBMISSION_CHARS, "Submission")
         prompt = (
             "Compare this student submission to the provided answer key "
             "and grade using the rubric.\n\n"
-            f"Grading Rubric:\n{rubric_text}\n\n"
+            f"Grading Rubric:\n{rubric}\n\n"
             f"{allowed_scores_note}\n\n"
-            f"Answer Key / Model Solution:\n{answer_key_text}\n\n"
+            f"Answer Key / Model Solution:\n{answer_key}\n\n"
             f"Submission Filename: {filename}\n\n"
-            f"Submission Content:\n{submission_for_llm}"
+            f"Submission Content:\n{submission_text}"
         )
     else:
-        rubric_text = _trim_text(rubric, MAX_RUBRIC_CHARS, "Rubric")
-        submission_for_llm = _trim_text(submission_text, MAX_SUBMISSION_CHARS, "Submission")
         prompt = (
             "Grade this student submission using the rubric only.\n\n"
-            f"Grading Rubric:\n{rubric_text}\n\n"
+            f"Grading Rubric:\n{rubric}\n\n"
             f"{allowed_scores_note}\n\n"
             f"Submission Filename: {filename}\n\n"
-            f"Submission Content:\n{submission_for_llm}"
+            f"Submission Content:\n{submission_text}"
         )
 
     # Guard: if submission is empty (e.g. scanned PDF with no text layer),
     # return a clean error instead of sending empty content to the grader.
-    if not submission_for_llm or len(submission_for_llm.strip()) < 50:
+    if not submission_text or len(submission_text.strip()) < 50:
         return {
             "name":            preferred_name or filename,
             "id":              preferred_id or filename,

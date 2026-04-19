@@ -191,13 +191,20 @@ _READERS = {
 }
 
 
-_ID_TOKEN_RE = re.compile(r"\b([A-Za-z]{0,4}\d{5,}|\d{6,}|[A-Za-z]\d{4,})\b")
+# Improved regex patterns for ID and name extraction
+# ID patterns: student ID, roll number, registration, etc.
+_ID_TOKEN_RE = re.compile(
+    # Student ID patterns: CS2024001, F2023376425, B123456, etc.
+    r"\b([A-Z]{1,3}\d{5,}|\d{6,}|[A-Z]\d{5,}|[A-Z]{2}\d{4,})\b",
+    re.IGNORECASE
+)
 _NAME_LABEL_RE = re.compile(
-    r"(?im)^\s*(?:student\s*)?name\s*[:#\-]\s*([A-Za-z][A-Za-z .'\-]{2,100})\s*$"
+    r"(?im)^\s*(?:student\s*)?name\s*[:#\-=]\s*([A-Za-z][A-Za-z .'-]{2,100})\s*$"
 )
 _ID_LABEL_RE = re.compile(
-    r"(?im)^\s*(?:student\s*)?(?:id|roll\s*no|registration\s*no|reg\s*no)\s*[:#\-]\s*([A-Za-z0-9\-_/]{4,})"
+    r"(?im)^\s*(?:student\s*)?(?:id|roll\s*no|roll#|registration\s*no|reg\s*no|matric|student\s*id)\s*[:#\-=]\s*([A-Za-z0-9\-_/]{4,})"
 )
+
 _NOISE_TOKENS = {
     "assignment", "submission", "assignsubmission", "file", "student", "answer",
     "solution", "final", "draft", "copy", "doc", "pdf", "python", "cpp",
@@ -207,48 +214,86 @@ _NOISE_TOKENS = {
 
 
 def _normalize_name(name: str) -> str:
+    """Normalize and validate student name."""
+    # Remove excessive whitespace
     cleaned = re.sub(r"\s+", " ", name).strip(" _-.,")
     if not cleaned:
         return ""
+    
+    # Reject if too many numbers (likely not a real name)
+    num_count = sum(1 for c in cleaned if c.isdigit())
+    if num_count > len(cleaned) * 0.3:  # More than 30% digits = likely not a name
+        return ""
+    
+    # Reject if too short
+    if len(cleaned) < 3:
+        return ""
+    
+    # Capitalize words properly
     words = []
     for word in cleaned.split(" "):
-        if not word:
+        if not word or len(word) < 2:
             continue
         if "'" in word:
             words.append("'".join(part.capitalize() for part in word.split("'")))
         else:
             words.append(word.capitalize())
-    return " ".join(words)
+    
+    result = " ".join(words)
+    
+    # Reject if result is too short after normalization
+    return result if len(result) >= 3 else ""
 
 
 def _extract_id_from_text(text: str) -> str:
+    """Extract student ID from text with improved pattern matching."""
+    # 1. Try labeled ID patterns (highest priority)
     label_match = _ID_LABEL_RE.search(text)
     if label_match:
-        return label_match.group(1).strip().upper()
-
+        extracted = label_match.group(1).strip().upper()
+        # Validate ID is not just noise
+        if len(extracted) >= 4 and not extracted.startswith("NO"):
+            return extracted
+    
+    # 2. Try token patterns (student ID codes)
     token_match = _ID_TOKEN_RE.search(text)
     if token_match:
-        return token_match.group(1).strip().upper()
-
+        extracted = token_match.group(1).strip().upper()
+        if len(extracted) >= 5:  # Minimum reasonable length
+            return extracted
+    
     return ""
 
 
 def _extract_name_from_text(text: str) -> str:
+    """Extract student name from text with validation."""
+    # 1. Try explicit label patterns (highest priority)
     label_match = _NAME_LABEL_RE.search(text)
     if label_match:
-        return _normalize_name(label_match.group(1))
-
+        extracted = _normalize_name(label_match.group(1))
+        if extracted:
+            return extracted
+    
+    # 2. Try pattern extraction from general text
     collapsed = re.sub(r"[_\-]+", " ", text)
     collapsed = re.sub(r"\b\d+\b", " ", collapsed)
     collapsed = _ID_TOKEN_RE.sub(" ", collapsed)
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\.]{1,}", collapsed) if w.lower() not in _NOISE_TOKENS]
-
+    
+    # Extract words that look like names
+    words = [
+        w for w in re.findall(r"[A-Za-z][A-Za-z'\.]{1,}", collapsed)
+        if w.lower() not in _NOISE_TOKENS and len(w) >= 2
+    ]
+    
+    # Need at least 2 words for a reasonable name
     if len(words) < 2:
         return ""
-
-    # Keep first plausible full name chunk (2-5 words).
+    
+    # Keep first plausible full name chunk (2-5 words)
     candidate = " ".join(words[:5])
-    return _normalize_name(candidate)
+    extracted = _normalize_name(candidate)
+    
+    return extracted if extracted else ""
 
 
 def _infer_identity_for_group(files: list[dict], base_dir: str, lms_meta: dict) -> dict:
