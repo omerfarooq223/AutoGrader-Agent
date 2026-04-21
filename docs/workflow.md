@@ -76,7 +76,8 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - **Concurrency**: `MAX_CONCURRENT_GRADES=1` by default. Architecture supports higher parallelism via `.env` — but rate limits make >1 unsafe on free tier.
 - **Throttle**: 30s sleep between submissions (60s for large submissions >5k chars). Ensures Token-Per-Minute quota replenishes.
 - **Cache**: Each result is saved atomically to `.grading_cache.json` immediately after completion using `cache_key` as the key. Cache files are **versioned** — when the scoring format changes, stale caches from prior versions are auto-discarded. Duplicate filenames are handled correctly. Atomic write (temp → rename) prevents cache corruption on crash.
-- **Retry**: Failed API calls are retried with exponential backoff. **429 rate limit errors parse the exact retry time from Groq's error message** and wait precisely that long before retrying Groq — never fall through to Gemini on rate limit. Other Groq failures fall through to Gemini fallback.
+- **Retry**: Failed API calls use a **circuit breaker** per provider. After **3 consecutive failures**, the circuit opens and that provider is skipped for the remainder of the session. 429 rate-limit errors parse the exact retry time from Groq's error message and wait precisely that long before retrying once — if that retry also fails the failure is recorded toward the circuit threshold. Non-rate-limit Groq failures fall through to Gemini. Permanent quota exhaustion (`limit: 0`, `quota`, `daily`) is detected and immediately opens the circuit without waiting.
+- **JSON validation**: LLM responses go through a 4-step parse pipeline — (1) direct `json.loads`, (2) brace-matched partial extraction, (3) structural validation (`category_scores` present, all scores numeric), (4) structured error record if all steps fail. Invalid structures are caught before they silently corrupt score totals.
 - **Error submissions**: Files that could not be read (too large, corrupt, permission error) receive a clear error string as their content. These are graded with an "Error" mark — not silently passed through the LLM with garbage input.
 
 ### Step 7: Plagiarism Detection
@@ -116,11 +117,14 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 | Scenario | Handling |
 |----------|----------|
-| Groq 429 rate limit | Parses exact retry time from error message, waits precisely, retries Groq |
-| Groq non-429 failure | Falls through to Gemini fallback (regional availability varies) |
-| Gemini daily quota exhausted (`limit: 0`) | Detected immediately, all Gemini fallbacks skipped with clear error |
+| Groq 429 rate limit | Parses exact retry time from error message, waits precisely, retries Groq once; failure counted toward circuit breaker |
+| Groq non-429 failure | Failure recorded; after 3 consecutive failures circuit opens and Groq is skipped for the session; falls through to Gemini |
+| Groq/Gemini quota exhausted (`limit: 0`, `quota`, `daily`) | Detected immediately via `_check_quota_exhausted()`; circuit opened for that provider; all its fallbacks skipped |
+| Circuit breaker open | Provider skipped entirely for the session; logged as `Circuit breaker OPEN` |
 | Process crash mid-grading | Atomic cache survives; next run resumes from `cache_key` checkpoint |
-| Malformed LLM JSON | Graceful fallback with "Error" mark; raw response snippet in deductions |
+| Malformed LLM JSON | 4-step parse pipeline: direct parse → brace-match recovery → structural validation → structured error record with `"marks": "Error"` |
+| LLM returns empty `category_scores` | Caught by structural validation; treated as parse failure with error mark |
+| LLM criterion score not numeric | Caught by structural validation before any math is attempted |
 | Individual criterion score > max_score | Capped to rubric max by Python |
 | Stale cache from old scoring format | Auto-discarded via cache version check |
 | File too large (> 20MB) | Skipped with student-facing error message; grader sees it, scores 0 |

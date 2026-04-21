@@ -42,7 +42,7 @@ AutoGrader/
 │   └── test_autograder.py           # Test suite (pytest)
 ├── utils/                           # Shared utilities
 │   ├── cache.py                     # Crash-recovery grading cache
-│   ├── llm_client.py                # Redundant LLM dual-routing API wrapper
+│   ├── llm_client.py                # LLM dual-routing API wrapper with per-provider circuit breaker
 │   └── retry.py                     # Exponential backoff for API calls
 ├── rubrics/                         # Rubric templates for common assignment types
 │   ├── programming_assignment.json  # Correctness, Code Quality, etc.
