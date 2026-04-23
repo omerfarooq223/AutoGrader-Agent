@@ -3,19 +3,14 @@ Centralized configuration — reads from environment / .env file.
 """
 
 import os
-from pathlib import Path
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - fallback for minimal environments
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
-# Load .env file if present (no external dependency needed)
-_env_path = Path(__file__).resolve().parent / ".env"
-if _env_path.exists():
-    with open(_env_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key, value = key.strip(), value.strip().strip("\"'")
-            os.environ[key] = value
+# Load .env from project root using robust parser.
+load_dotenv()
 
 
 # ── API ─────────────────────────────────────────────────────────

@@ -5,7 +5,6 @@ Excel writer utility — generates the final grading report with:
   - Class insights section (top 3 common mistakes via LLM analysis)
 """
 
-import json
 import logging
 import re
 import statistics
@@ -15,8 +14,6 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 from config import PASS_THRESHOLD, TOTAL_MARKS
-from utils.llm_client import call_llm
-from utils.retry import retry_api_call
 
 logger = logging.getLogger(__name__)
 
@@ -89,49 +86,41 @@ def _clean_category_name(name: str) -> str:
 
 def _generate_class_insights(results: list[dict]) -> list[str]:
     """
-    Send all deduction reasons to the LLM and return the top 3 most common
-    mistakes as a list of strings.
+    Deterministically infer top 3 common mistakes from deduction text.
+    This avoids LLM dependency for class insights generation.
     """
-    deductions = [
-        r.get("deductions", "") for r in results
-        if r.get("deductions") and r.get("deductions") != ""
-    ]
-    if not deductions:
+    parsed: list[tuple[str, str]] = []
+    for r in results:
+        d = r.get("deductions", "") or ""
+        if not d or d == "No deductions.":
+            continue
+        for crit, reason, _ded in re.findall(
+            r"([^:]+):\s*([^(,;|]+?)\s*\(-\s*(\d+(?:\.\d+)?)\)",
+            d,
+        ):
+            parsed.append((crit.strip(), reason.strip().lower()))
+
+    if not parsed:
         return []
 
-    # Cap total input to avoid quota exhaustion on large classes
-    # Each deduction trimmed to 300 chars — enough signal for pattern detection
-    trimmed = [d[:300] for d in deductions]
-    combined = "\n---\n".join(trimmed)
-    if len(combined) > 8000:
-        combined = combined[:8000] + "\n[truncated]"
+    by_criterion: dict[str, int] = {}
+    by_reason: dict[str, int] = {}
+    for crit, reason in parsed:
+        by_criterion[crit] = by_criterion.get(crit, 0) + 1
+        if reason and reason not in {"marks deducted", "criterion not evaluated by grader"}:
+            by_reason[reason] = by_reason.get(reason, 0) + 1
 
-    system_prompt = (
-        "You are an academic analytics assistant. You will receive mark deduction "
-        "reasons from multiple student submissions.\n\n"
-        "Analyze all the deductions and identify the top 3 most common mistakes "
-        "across the class.\n\n"
-        "Respond ONLY with valid JSON in this exact format:\n"
-        '{"insights": ["<mistake 1>", "<mistake 2>", "<mistake 3>"]}'
-    )
+    top_criteria = sorted(by_criterion.items(), key=lambda x: x[1], reverse=True)
+    top_reasons = sorted(by_reason.items(), key=lambda x: x[1], reverse=True)
 
-    def _call():
-        raw = call_llm(
-            system_prompt=system_prompt,
-            user_prompt=f"Deduction reasons:\n\n{combined}",
-            max_tokens=512,
-        )
-        text = raw
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        data = json.loads(text)
-        return data.get("insights", [])
+    insights: list[str] = []
+    for crit, count in top_criteria[:2]:
+        insights.append(f"{crit} was the most commonly deducted criterion ({count} submission(s)).")
+    if top_reasons:
+        reason, count = top_reasons[0]
+        insights.append(f"Most repeated deduction reason: {reason} ({count} submission(s)).")
 
-    try:
-        return retry_api_call(_call)
-    except Exception:
-        logger.warning("Failed to generate class insights; skipping.", exc_info=True)
-        return []
+    return insights[:3]
 
 
 def generate_class_insights(results: list[dict]) -> list[str]:

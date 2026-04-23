@@ -32,3 +32,6 @@ debug_gemini.py
 list_models.py
 quota_test.py
 check_gemini.py
+
+# Local working data
+scratch/

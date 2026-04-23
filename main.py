@@ -2,7 +2,7 @@
 AutoGrader — AI-powered grading agent.
 
 Usage:
-    python main.py <submissions.zip> <assignment_brief_file>
+    python main.py <submissions.zip> <assignment_brief_file> [student_roster.xlsx]
 
 Features:
     - LLM rubric generation with approval workflow
@@ -24,7 +24,7 @@ from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 import config  # noqa: F401  — triggers .env loading
-from skills.file_extractor.extractor import extract_and_collect, read_file
+from skills.file_extractor.extractor import extract_and_collect, read_file, load_student_roster
 from utils.cache import load_cache, save_cache, clear_cache
 from skills.rubric_generator.rubric_agent import generate_rubric, approve_rubric, save_rubric, load_rubric
 from skills.grader.grader_agent import grade_all
@@ -65,8 +65,10 @@ def _collect_answer_key() -> str | None:
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        console.print("[bold red]Usage:[/] python main.py <submissions.zip> <assignment_brief>")
+    if len(sys.argv) not in (3, 4):
+        console.print(
+            "[bold red]Usage:[/] python main.py <submissions.zip> <assignment_brief> [student_roster.xlsx]"
+        )
         sys.exit(1)
 
     if not config.GROQ_API_KEY:
@@ -75,6 +77,7 @@ def main() -> None:
 
     zip_path   = sys.argv[1]
     brief_path = sys.argv[2]
+    roster_path = sys.argv[3] if len(sys.argv) == 4 else None
 
     # Session directory: named after the ZIP so two classes never share a cache
     zip_stem = Path(zip_path).stem
@@ -117,11 +120,31 @@ def main() -> None:
 
         # ── 4. Extract & read submissions ───────────────────────
         console.rule("[bold blue]Step 4: Extract Submissions")
+        roster = None
+        if roster_path:
+            with console.status("Loading student roster…"):
+                roster = load_student_roster(roster_path)
+            logger.info("Roster loaded with %d student(s).", len(roster))
+
         with console.status("Extracting ZIP…"):
             # extract_and_collect now returns (submissions, extract_dir)
             # extract_dir is kept alive for cache crash recovery
-            submissions, extract_dir = extract_and_collect(zip_path)
+            submissions, extract_dir = extract_and_collect(
+                zip_path,
+                student_roster=roster,
+            )
         logger.info("Found %d submission(s).", len(submissions))
+        if roster:
+            unmatched = sum(
+                1
+                for s in submissions
+                if s.get("identity_meta", {}).get("id_source") == "roster_unmatched"
+            )
+            if unmatched:
+                logger.warning(
+                    "Roster mode: %d submission(s) could not be matched to roster; marked as Unmatched Submission / N/A.",
+                    unmatched,
+                )
 
         if not submissions:
             console.print("[bold red]No supported files found. Exiting.[/]")

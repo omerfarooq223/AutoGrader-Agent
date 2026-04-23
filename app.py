@@ -16,7 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import config
-from skills.file_extractor.extractor import extract_and_collect, read_file
+from skills.file_extractor.extractor import extract_and_collect, read_file, load_student_roster
 from skills.rubric_generator.rubric_agent import generate_rubric
 from skills.grader.grader_agent import grade_all
 from utils.cache import load_cache, save_cache, clear_cache
@@ -50,6 +50,7 @@ _DEFAULTS = {
     "rubric_key_v": 0,
     "lms_meta": {},
     "plagiarism_enabled": True,
+    "student_roster_uploaded_filename": None,
 }
 
 for k, v in _DEFAULTS.items():
@@ -334,6 +335,7 @@ if config.EXTRACT_IMAGES:
 # Variables initialization from session state for early UI components
 zip_file = st.session_state.get("zip_uploader")
 brief_file = st.session_state.get("brief_uploader")
+student_roster_file = st.session_state.get("roster_uploader")
 
 # ── Stepper (Top Progress Bar) ──────────────────────────────────
 upload_done = bool(zip_file and brief_file)
@@ -574,21 +576,30 @@ with st.sidebar:
 
 # ── Step 1 — Upload Files ───────────────────────────────────────
 _step(1, "Upload Files", "Upload your submissions ZIP and assignment brief.")
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     zip_file_new = st.file_uploader("Submissions ZIP", type=["zip"], key="zip_uploader")
 with col2:
     brief_file_new = st.file_uploader("Assignment Brief", type=["pdf", "docx"], key="brief_uploader")
+with col3:
+    roster_file_new = st.file_uploader(
+        "Student Roster (Optional)",
+        type=["xlsx"],
+        key="roster_uploader",
+        help="Excel with Name and ID columns. When provided, identity comes from roster.",
+    )
 
 # Sync file references
 if zip_file_new: zip_file = zip_file_new
 if brief_file_new: brief_file = brief_file_new
+if roster_file_new:
+    student_roster_file = roster_file_new
+    st.session_state.student_roster_uploaded_filename = roster_file_new.name
 upload_done = bool(zip_file and brief_file)
 
 _divider()
 
 # ── Step 2 — Grading Rubric ─────────────────────────────────────
-_divider()
 _step(2, "Grading Rubric", "Choose how to provide the grading rubric.")
 
 if zip_file and brief_file:
@@ -746,7 +757,6 @@ if zip_file and brief_file:
                                 "Partial Marks":   partial,
                                 "Minimal / Zero":  minimal,
                             })
-                        import pandas as pd
                         st.dataframe(
                             pd.DataFrame(rows),
                             width="stretch",
@@ -881,13 +891,25 @@ if st.session_state.rubric_approved:
     if st.session_state.answer_key_final:
         if not st.session_state.answer_key_approved:
             _status("Review the answer key and click Approve to proceed.", "info")
-            if st.button("Approve Answer Key", key="approve_answer_key"):
-                st.session_state.answer_key_approved = True
-                st.rerun()
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                if st.button("Approve Answer Key", key="approve_answer_key"):
+                    st.session_state.answer_key_approved = True
+                    st.rerun()
+            with ac2:
+                if st.button("Skip — Grade with Rubric Only", key="skip_answer_key", type="secondary"):
+                    st.session_state.answer_key_final = None
+                    st.session_state.answer_key_approved = True
+                    st.rerun()
         else:
             _status("Answer key approved and locked.", "success")
     else:
-        _status("The rubric is approved! Now provide or generate an answer key to proceed.", "info")
+        _status("The rubric is approved. You can provide an answer key or skip and grade with rubric only.", "info")
+        if not st.session_state.answer_key_approved:
+            if st.button("Skip — Grade with Rubric Only", key="skip_answer_key_no_input", type="secondary"):
+                st.session_state.answer_key_final = None
+                st.session_state.answer_key_approved = True
+                st.rerun()
 else:
     _status("Step locked. Approve the grading rubric in **Step 2** to unlock.", "info")
 
@@ -930,7 +952,30 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
                 exclude = []
                 if st.session_state.get("answer_key_uploaded_filename"):
                     exclude.append(st.session_state.answer_key_uploaded_filename)
-                submissions, extract_dir = extract_and_collect(tmp_zip, exclude_filenames=exclude)
+                roster = None
+                if student_roster_file:
+                    tmp_roster = _save_temp(student_roster_file, ".xlsx")
+                    try:
+                        roster = load_student_roster(tmp_roster)
+                    finally:
+                        os.unlink(tmp_roster)
+                    st.info(f"Roster loaded with {len(roster)} student(s).")
+
+                submissions, extract_dir = extract_and_collect(
+                    tmp_zip,
+                    exclude_filenames=exclude,
+                    student_roster=roster,
+                )
+                if roster:
+                    unmatched = sum(
+                        1
+                        for s in submissions
+                        if s.get("identity_meta", {}).get("id_source") == "roster_unmatched"
+                    )
+                    if unmatched:
+                        st.warning(
+                            f"Roster mode: {unmatched} submission(s) were not matched in roster and marked as Unmatched Submission / N/A."
+                        )
                 if st.session_state.get("answer_key_uploaded_filename"):
                     ak_stem = Path(st.session_state.answer_key_uploaded_filename).stem.lower()
                     before = len(submissions)
@@ -995,20 +1040,18 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
             _lms = next((s.get("lms_meta", {}) for s in submissions
                          if s.get("lms_meta", {}).get("assignment_name")), {})
             st.session_state.lms_meta = _lms
-            write_results(
-                results, report_path, return_insights=False,
+            write_out = write_results(
+                results, report_path, return_insights=True,
                 assignment_name=_lms.get("assignment_name", ""),
                 course_code=_lms.get("course_code", ""),
                 semester=_lms.get("semester", ""),
             )
+            if isinstance(write_out, tuple):
+                _written_path, _insights = write_out
+            else:
+                _written_path, _insights = write_out, []
             clear_cache(session_dir)
-            def _gen_insights():
-                try:
-                    from skills.report_writer.excel_writer import generate_class_insights
-                    st.session_state.class_insights = generate_class_insights(results)
-                except Exception:
-                    st.session_state.class_insights = []
-            threading.Thread(target=_gen_insights, daemon=True).start()
+            st.session_state.class_insights = _insights
 
             st.session_state.results = results
             st.session_state.report_bytes = Path(report_path).read_bytes()
@@ -1202,12 +1245,15 @@ if st.session_state.results is not None:
         )
 
         if st.button("Apply score overrides", key="apply_score_overrides"):
-            results_by_name = {r.get("name", ""): dict(r) for r in results}
+            results_by_identity = {
+                (str(r.get("name", "")), str(r.get("id", ""))): dict(r)
+                for r in results
+            }
             updated_results = []
             for i, (_, row) in enumerate(edited_df.iterrows()):
-                name_key = str(row.get("name", ""))
-                if name_key in results_by_name:
-                    updated = dict(results_by_name[name_key])
+                identity_key = (str(row.get("name", "")), str(row.get("id", "")))
+                if identity_key in results_by_identity:
+                    updated = dict(results_by_identity[identity_key])
                 else:
                     updated = dict(results[i]) if i < len(results) else {}
 

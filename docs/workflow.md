@@ -10,9 +10,9 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 ### Step 1: Configuration Loading
 - On startup, `config.py` reads the `.env` file and populates environment variables.
-- No external `dotenv` dependency — uses a built-in parser.
+- Uses `python-dotenv` for robust `.env` parsing.
 - All settings (API key, model, thresholds, concurrency) are centralized here.
-- Key production defaults: `MODEL=llama-3.1-8b-instant`, `MAX_CONCURRENT_GRADES=1`, `MAX_RETRIES=4`, `GRADING_MAX_OUTPUT_TOKENS=800`.
+- Key defaults: `MODEL=llama-3.3-70b-versatile`, `MAX_CONCURRENT_GRADES=1`, `MAX_RETRIES=3`, `GRADING_MAX_OUTPUT_TOKENS=768`.
 
 ### Step 2: Assignment Brief Ingestion
 - The brief file is read using `file_extractor/extractor.py`.
@@ -21,7 +21,7 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 ### Step 3: Rubric Generation & Approval
 - Before generating, the system checks `rubrics/` for a matching template by scanning the brief for keywords. A template is used only if it matches **≥2 keywords AND ≥40% of its keyword list** — prevents false matches on short keyword overlap.
-- **With template**: The LLM receives the template structure and is asked to keep criterion names, adjust weights, and write detailed descriptions.
+- **With template**: The rubric is built deterministically from template criteria (no LLM call), with default full/partial/minimal descriptions if needed, then scaled to total marks.
 - **Without template**: The brief text is sent to the LLM to generate a rubric from scratch.
 - In both cases, the LLM produces a **structured JSON rubric**:
   ```json
@@ -32,14 +32,15 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
     ]
   }
   ```
-- **Manual Rubric (Auto-Formatting)**: If the user provides a rubric manually, the system automatically detects if it is raw text (PDF paste, CSV, etc.) and uses the LLM to format it into the required JSON structure. This happens automatically when the user finishes pasting and clicks away.
+- **Manual Rubric (Auto-Formatting)**: If the user provides a rubric manually, the system first attempts deterministic parsing (JSON/table/line formats). LLM formatting is only used as fallback when deterministic parsing fails.
 - The output is validated via `_parse_rubric_json()` — invalid JSON or missing fields triggers an automatic retry.
 - The user reviews the rubric and chooses to **Approve**. Large-scale edits can be made directly in the JSON or raw text before approval.
 - The approved rubric is saved atomically to `.rubric_cache.json` for reuse.
-- The LLM used for rubric generation is **Groq llama-3.1-8b-instant** (primary). Gemini is a regional fallback — unavailable in Pakistan.
+- The LLM used for rubric generation follows configured provider routing (**Groq primary, Gemini fallback**).
 
 ### Step 4: Answer Key (Optional)
-- The user can provide an answer key via file upload, manual paste, or skip entirely.
+- The user can provide an answer key via file upload or manual paste.
+- In Streamlit, users can explicitly click **Skip — Grade with Rubric Only**.
 - If provided, each submission is graded by comparing it against the answer key alongside the rubric — improving accuracy significantly for factual and code assignments.
 - The answer key filename is excluded from the submissions list automatically so the answer key author is never graded as a student.
 
@@ -55,17 +56,15 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
   - **DOCX**: Paragraphs and **table content** both extracted (tables are not in `doc.paragraphs` and were previously invisible to the grader).
   - **.py / .cpp**: Read as plain text.
   - **.ipynb**: Code cells, markdown cells, and **cell outputs** (print results, errors, return values) all extracted — output is critical for grading whether code actually ran correctly.
+- **Unsupported archives**: `.rar` / `.7z` submissions are skipped with a warning to convert to ZIP.
 - **Image extraction** (only when `EXTRACT_IMAGES=True`): Embedded images sent to Gemini Vision for description. Fails fast on quota exhaustion — never retries image description, so a dead Gemini quota does not freeze the pipeline.
 - `extract_and_collect` returns `(submissions, extract_dir)`. The caller is responsible for cleaning up `extract_dir` **after** grading completes, so the cache file survives for crash recovery during long grading sessions.
 - **Student identity extraction precedence** (name + ID) is deterministic and done before grading:
-  1. Parse from submission **filename** (highest priority).
-  2. If either is missing, parse from parent **folder name(s)**.
-  3. If still missing, parse from submission **document content**.
-  4. Final fallback for missing name only: LMS metadata when available.
+  - With roster uploaded: identity is resolved from roster entries first (path/LMS hints used for matching).
+  - Without roster: precedence is filename → folder → document content, then LMS metadata fallback for missing name.
 
 ### Step 6: Grading
-- Each submission + the structured JSON rubric (+ answer key if provided) is sent to **Groq llama-3.1-8b-instant**.
-- The model was switched from 3.3 70B to 3.1 8B Instant because: (a) 8B has ~5× higher free-tier TPM limit, (b) rubric-based grading against a provided answer key does not require strong open-ended reasoning — the LLM's job is comparison and scoring, not generation.
+- Each submission + the structured JSON rubric (+ answer key if provided) is sent via `utils/llm_client.py` using configured provider/model routing (Groq primary with Gemini fallback).
 - **Student name + ID**: The grader consumes pre-extracted identity metadata from extraction step (filename → folder → content precedence). LLM identity output is now fallback-only when extraction cannot infer values.
 - **LLM response**: The LLM returns per-criterion scores and brief reasons only: `{id, category_scores: {CritName: {score, reason}}}`. The LLM does NOT calculate totals, write `(-N)` amounts, or format deduction strings.
 - **Deterministic Python scoring** (all math done in Python, never by the LLM):
@@ -74,9 +73,9 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
   3. Deduction text: Built by Python as `"CritName: reason (-N)"` where `N = max_score - score`. Deduction amounts are guaranteed correct since they're derived from the score, not from LLM text.
   4. If all criteria have full marks: `"No deductions."`.
 - **Concurrency**: `MAX_CONCURRENT_GRADES=1` by default. Architecture supports higher parallelism via `.env` — but rate limits make >1 unsafe on free tier.
-- **Throttle**: 30s sleep between submissions (60s for large submissions >5k chars). Ensures Token-Per-Minute quota replenishes.
+- **Rate limiting**: No fixed pre-sleep. Backoff is applied only on actual provider rate-limit errors.
 - **Cache**: Each result is saved atomically to `.grading_cache.json` immediately after completion using `cache_key` as the key. Cache files are **versioned** — when the scoring format changes, stale caches from prior versions are auto-discarded. Duplicate filenames are handled correctly. Atomic write (temp → rename) prevents cache corruption on crash.
-- **Retry**: Failed API calls use a **circuit breaker** per provider. After **3 consecutive failures**, the circuit opens and that provider is skipped for the remainder of the session. 429 rate-limit errors parse the exact retry time from Groq's error message and wait precisely that long before retrying once — if that retry also fails the failure is recorded toward the circuit threshold. Non-rate-limit Groq failures fall through to Gemini. Permanent quota exhaustion (`limit: 0`, `quota`, `daily`) is detected and immediately opens the circuit without waiting.
+- **Retry + circuit breaker**: Failed API calls use a provider-level circuit breaker. After threshold failures, circuit opens; after cooldown it transitions to half-open and allows a probe request to recover.
 - **JSON validation**: LLM responses go through a 4-step parse pipeline — (1) direct `json.loads`, (2) brace-matched partial extraction, (3) structural validation (`category_scores` present, all scores numeric), (4) structured error record if all steps fail. Invalid structures are caught before they silently corrupt score totals.
 - **Error submissions**: Files that could not be read (too large, corrupt, permission error) receive a clear error string as their content. These are graded with an "Error" mark — not silently passed through the LLM with garbage input.
 
@@ -101,7 +100,7 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - **Marks column header** shows the assignment total: `Marks (/ 15)`.
 - **Grade distribution** is calculated as a percentage of the **actual rubric total** (derived from marks data), not the config `TOTAL_MARKS` value. This prevents all students landing in F when `TOTAL_MARKS=100` but the rubric only adds to 15.
 - **Pass threshold** is computed as 50% of the rubric total — shown explicitly in stats as `Pass Mark: ≥ 8 (50%)`.
-- **Class Insights**: deduction reasons are trimmed (300 chars each, 8000 char total cap) and sent to the LLM to identify top 3 most common mistakes. Students with grading errors are excluded. In `app.py`, insights are generated in a **background thread** so the UI stays responsive — the report file is available immediately regardless of how long insights take.
+- **Class Insights**: generated deterministically from deduction frequency patterns (criteria/reasons), avoiding LLM calls in report generation. Streamlit reuses insights returned by `write_results(..., return_insights=True)`.
 - The grading cache is cleared only **after** the report is successfully written — a crash during report generation does not lose grading progress.
 
 ### Step 9: Results UI Analytics & Manual Override
@@ -120,7 +119,7 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 | Groq 429 rate limit | Parses exact retry time from error message, waits precisely, retries Groq once; failure counted toward circuit breaker |
 | Groq non-429 failure | Failure recorded; after 3 consecutive failures circuit opens and Groq is skipped for the session; falls through to Gemini |
 | Groq/Gemini quota exhausted (`limit: 0`, `quota`, `daily`) | Detected immediately via `_check_quota_exhausted()`; circuit opened for that provider; all its fallbacks skipped |
-| Circuit breaker open | Provider skipped entirely for the session; logged as `Circuit breaker OPEN` |
+| Circuit breaker open | Provider skipped while open; after cooldown it half-opens and allows a probe request |
 | Process crash mid-grading | Atomic cache survives; next run resumes from `cache_key` checkpoint |
 | Malformed LLM JSON | 4-step parse pipeline: direct parse → brace-match recovery → structural validation → structured error record with `"marks": "Error"` |
 | LLM returns empty `category_scores` | Caught by structural validation; treated as parse failure with error mark |
@@ -129,10 +128,10 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 | Stale cache from old scoring format | Auto-discarded via cache version check |
 | File too large (> 20MB) | Skipped with student-facing error message; grader sees it, scores 0 |
 | Corrupt/unreadable file | Error stored as content; submission not silently dropped |
-| Unsupported file format in ZIP | Skipped silently |
+| Unsupported file format in ZIP | Skipped (unsupported `.rar` / `.7z` archives emit conversion warning) |
 | Unsafe ZIP entries (zip-slip) | Rejected with ValueError before extraction |
 | Duplicate filenames in ZIP | Handled via content-hash `cache_key` — no result collisions |
 | Answer key file left in ZIP | Excluded by filename stem matching before grading |
 | Image extraction failure | Fails fast (no retry); text extraction continues unaffected |
-| Class insights LLM failure | Skipped silently; report still generated without insights section |
+| Class insights generation failure | Safely skipped; report still generated without insights section |
 | Report write interrupted mid-file | Atomic write (temp → rename) leaves previous report intact |

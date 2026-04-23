@@ -12,6 +12,8 @@ Usage:
 
 import logging
 import os
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -79,42 +81,76 @@ def _call_gemini(
 # ── Circuit breaker state ──────────────────────────────────────────
 _provider_failure_counts = {"groq": 0, "gemini": 0}
 _provider_circuit_open = {"groq": False, "gemini": False}
+_provider_circuit_opened_at = {"groq": 0.0, "gemini": 0.0}
+_provider_half_open_probe_in_flight = {"groq": False, "gemini": False}
+_circuit_lock = threading.Lock()
 CIRCUIT_BREAKER_THRESHOLD = 3  # Open circuit after 3 consecutive failures
+CIRCUIT_BREAKER_RESET_SECONDS = 90
 
 
 def _check_quota_exhausted(error_msg: str) -> bool:
     """Check if error indicates permanent quota exhaustion."""
     error_lower = error_msg.lower()
     return (
-        "limit: 0" in error_msg or
-        "quota" in error_lower or
-        "daily" in error_lower or
+        "limit: 0" in error_lower or
+        "limit 0" in error_lower or
+        "insufficient_quota" in error_lower or
+        "tokens per day" in error_lower or
         "permanently" in error_lower
     )
 
 
 def _should_skip_provider(provider: str) -> bool:
-    """Check if provider should be skipped due to circuit breaker."""
-    if _provider_circuit_open.get(provider, False):
+    """
+    Check if provider should be skipped due to circuit breaker.
+    Supports OPEN -> HALF-OPEN transition after cooldown.
+    """
+    with _circuit_lock:
+        if not _provider_circuit_open.get(provider, False):
+            return False
+
+        opened_at = _provider_circuit_opened_at.get(provider, 0.0)
+        elapsed = time.time() - opened_at
+        if elapsed >= CIRCUIT_BREAKER_RESET_SECONDS:
+            # Half-open probe: allow one request through.
+            if not _provider_half_open_probe_in_flight.get(provider, False):
+                _provider_half_open_probe_in_flight[provider] = True
+                logger.warning(
+                    "Circuit breaker HALF-OPEN for %s — allowing probe request.",
+                    provider.upper(),
+                )
+                return False
+            logger.warning(
+                "Circuit breaker HALF-OPEN for %s — probe already in flight, skipping provider.",
+                provider.upper(),
+            )
+            return True
+
         logger.warning("Circuit breaker OPEN for %s — skipping provider.", provider.upper())
         return True
-    return False
 
 
 def _record_failure(provider: str):
     """Record a provider failure and potentially open circuit breaker."""
-    _provider_failure_counts[provider] = _provider_failure_counts.get(provider, 0) + 1
-    if _provider_failure_counts[provider] >= CIRCUIT_BREAKER_THRESHOLD:
-        _provider_circuit_open[provider] = True
-        logger.error(
-            "Circuit breaker OPENED for %s after %d failures.",
-            provider.upper(), CIRCUIT_BREAKER_THRESHOLD
-        )
+    with _circuit_lock:
+        _provider_failure_counts[provider] = _provider_failure_counts.get(provider, 0) + 1
+        _provider_half_open_probe_in_flight[provider] = False
+        if _provider_failure_counts[provider] >= CIRCUIT_BREAKER_THRESHOLD:
+            _provider_circuit_open[provider] = True
+            _provider_circuit_opened_at[provider] = time.time()
+            logger.error(
+                "Circuit breaker OPENED for %s after %d failures.",
+                provider.upper(), CIRCUIT_BREAKER_THRESHOLD
+            )
 
 
 def _record_success(provider: str):
     """Reset failure counter on success."""
-    _provider_failure_counts[provider] = 0
+    with _circuit_lock:
+        _provider_failure_counts[provider] = 0
+        _provider_circuit_open[provider] = False
+        _provider_circuit_opened_at[provider] = 0.0
+        _provider_half_open_probe_in_flight[provider] = False
 
 
 # ── Unified entry point ──────────────────────────────────────────
@@ -126,8 +162,6 @@ def call_llm(
 ) -> str:
     import config
     import re
-    import time
-    
     groq_model = model or config.MODEL
     gemini_models = [config.GEMINI_MODEL, "gemini-2.0-flash", "gemini-flash-latest"]
     
@@ -155,7 +189,7 @@ def call_llm(
             # Check for rate limit with retry backoff
             elif "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg.upper():
                 logger.warning("Groq rate limit hit: %s", err_msg[:200])
-                match = re.search(r'retry in ([\d\.]+)s', err_msg)
+                match = re.search(r'(?:try again in|retry in)\s*([\d\.]+)s', err_msg, re.IGNORECASE)
                 if match:
                     wait = float(match.group(1)) + 1.0
                     logger.warning("Groq requested wait: %.1fs. Retrying once...", wait)
@@ -168,6 +202,10 @@ def call_llm(
                     except Exception as retry_err:
                         logger.warning("Groq retry failed: %s", retry_err)
                         last_error = retry_err
+                        _record_failure("groq")
+                else:
+                    logger.warning("Could not parse wait time from Groq rate limit. Falling back.")
+                    _record_failure("groq")
             else:
                 logger.warning("Groq failed: %s", err_msg[:200])
                 _record_failure("groq")

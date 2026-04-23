@@ -40,12 +40,37 @@ def _build_rubric_maxes(rubric: str | dict | None) -> dict[str, float]:
     if not rubric:
         return {}
     try:
-        obj = json.loads(rubric) if isinstance(rubric, str) else rubric
-        return {
-            c["name"]: float(c.get("max_score", 100))
-            for c in obj.get("criteria", [])
-        }
-    except Exception:
+        if isinstance(rubric, str):
+            text = rubric.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1] if len(text.split("\n", 1)) == 1 else text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            obj = json.loads(text)
+        else:
+            obj = rubric
+            
+        maxes: dict[str, float] = {}
+        for c in obj.get("criteria", []):
+            name = c.get("name")
+            if not name:
+                continue
+            raw_max = c.get("max_score")
+            if raw_max is None:
+                logger.warning("Rubric criterion '%s' has null max_score; defaulting to 0.", name)
+                maxes[name] = 0.0
+                continue
+            try:
+                maxes[name] = float(raw_max)
+            except (TypeError, ValueError):
+                import re
+                match = re.search(r'(\d+(?:\.\d+)?)', str(raw_max))
+                if match:
+                    maxes[name] = float(match.group(1))
+                else:
+                    logger.warning("Rubric criterion '%s' has invalid max_score '%s'; defaulting to 0.", name, raw_max)
+                    maxes[name] = 0.0
+        return maxes
+    except Exception as e:
+        logger.error("Failed to parse rubric max scores: %s", e)
         return {}
 
 
@@ -242,8 +267,12 @@ def _parse_json(
         canonical_name = matched_name or k
 
         # Cap score to max_score (never exceed rubric max, never go below 0)
-        cap = max_scores.get(canonical_name, 100)
-        score = max(0.0, min(float(score), cap))
+        if canonical_name in max_scores:
+            cap = max_scores[canonical_name]
+            score = max(0.0, min(float(score), cap))
+        else:
+            score = max(0.0, float(score))
+            
         cat_scores[canonical_name] = score
         cat_reasons[canonical_name] = reason.strip()
 
@@ -294,7 +323,7 @@ def _parse_json(
     # Format: "CriterionName: reason (-N)" for each criterion where score < max
     deduction_parts: list[str] = []
     for k, score in cat_scores.items():
-        cap = max_scores.get(k, 100)
+        cap = max_scores.get(k, 0)
         deducted = cap - score
         if deducted > 0:
             reason = cat_reasons.get(k, "marks deducted")
@@ -483,21 +512,10 @@ def grade_all(
     pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GRADES)
     cancel_event = threading.Event()
 
-    import time
     def _grade_one(sub: dict) -> dict:
         if cancel_event.is_set():
             raise InterruptedError("Cancelled")
-        
-        # Throttle API calls to prevent rate limits.
-        # With MAX_CONCURRENT_GRADES=1, 30s sleep ≈ 2 requests/min.
-        # Large submissions use 60s to allow TPM quota recovery.
-        base_sleep = 30.0
-        if len(sub["content"]) > 5000:
-            base_sleep = 60.0
-            logger.info("Large submission detected (>5k chars). Sleeping 60s for quota recovery.")
-        
-        time.sleep(base_sleep)
-        
+
         identity_meta = sub.get("identity_meta", {})
         preferred_name = (
             identity_meta.get("name")

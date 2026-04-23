@@ -5,10 +5,14 @@ AI-powered grading agent that automates assignment evaluation using LLMs. Availa
 ## What It Does
 
 - Accepts a **ZIP of student submissions** + an **assignment brief**
-- **Generates a structured grading rubric** via LLM (Groq / Gemini) — supports auto-detection from templates or **automatic AI-formatting of pasted text** (pasted raw rubrics are converted to JSON instantly)
+- **Generates a structured grading rubric** with deterministic-first logic — template-matched briefs are handled without LLM; unmatched briefs use LLM (Groq / Gemini fallback)
+- Supports **automatic rubric parsing** from pasted JSON/table/line formats, with LLM fallback only when deterministic parsing fails
 - Lets you provide or generate an **answer key/solution** (manual, file upload, or LLM-generated) for accurate grading
+- Supports an optional **student roster Excel** (Name + ID). When provided, student identity is taken from the roster so grading does not depend on parsing IDs/names from submission content.
 - **Grades each submission** against the rubric — LLM evaluates each criterion and provides a score with a brief reason; **all math is done by Python** (totals, deduction amounts, deduction text formatting, score capping)
-- Resolves **student name and ID deterministically** with fallback order: **filename → folder name → document content**
+- Resolves **student name and ID deterministically**:
+  - With roster: identity comes from roster entries.
+  - Without roster: fallback order is **filename → folder name → document content**.
 - **Detects plagiarism** using dual similarity analysis (TF-IDF cosine + character n-gram) — can be toggled on/off in the sidebar
 - Outputs a styled **Excel report** with per-criterion breakdown, class statistics, and class insights (top 3 common mistakes)
 
@@ -69,8 +73,8 @@ AutoGrader/
 
 | Format | Library | Image Support |
 |--------|---------|---------------|
-| PDF | PyMuPDF | Yes — embedded images extracted and described via Groq Vision |
-| DOCX | python-docx | Yes — media images extracted and described via Groq Vision |
+| PDF | PyMuPDF | Yes — embedded images extracted and described via Gemini Vision |
+| DOCX | python-docx | Yes — media images extracted and described via Gemini Vision |
 | .py | stdlib | — |
 | .cpp | stdlib | — |
 | .ipynb | stdlib JSON | — |
@@ -99,6 +103,8 @@ cp .env.example .env
 
 # 3a. Run via CLI
 python main.py submissions.zip assignment_brief.pdf
+# Optional: pass a roster Excel with Name/ID columns
+python main.py submissions.zip assignment_brief.pdf student_roster.xlsx
 
 # 3b. Run via Web UI
 streamlit run app.py
@@ -108,9 +114,9 @@ streamlit run app.py
 
 The Streamlit interface (`app.py`) provides a browser-based alternative to the CLI with a guided 5-step workflow:
 
-1. **Upload** — Drag-and-drop your submissions ZIP and assignment brief
-2. **Rubric** — Auto-detects template, generates rubric via LLM, or lets you paste raw text which is **automatically formatted into JSON** upon entry
-3. **Answer Key** — Provide manually, upload a file, or generate via LLM
+1. **Upload** — Drag-and-drop your submissions ZIP and assignment brief (optionally upload a roster Excel with student Name/ID)
+2. **Rubric** — Auto-detects template (deterministic), generates via LLM when needed, or formats pasted rubric text into JSON (deterministic-first)
+3. **Answer Key** — Provide manually, upload a file, generate via LLM, or explicitly skip and grade against rubric only
 4. **Grade** — Runs concurrent grading + plagiarism detection (controllable via a **sidebar toggle**) with a live progress bar
 5. **Results** — View summary metric cards, score distribution and criterion-average charts, apply manual score overrides in the UI, then download the updated Excel report and review "Class Insights" (top 3 mistakes)
 
@@ -132,14 +138,14 @@ All settings are in `.env` (see `.env.example`):
 |----------|---------|-------------|
 | `GROQ_API_KEY` | — | Your Groq API key (**Primary — recommended**) |
 | `GEMINI_API_KEY` | — | Your Gemini API key (Secondary fallback) |
-| `MODEL` | `llama-3.1-8b-instant` | Primary Groq model (higher free-tier quota) |
+| `MODEL` | `llama-3.3-70b-versatile` | Primary Groq model |
 | `GEMINI_MODEL` | `gemini-2.0-flash` | Fallback Gemini model (unavailable in some regions) |
 | `EXTRACT_IMAGES` | `False` | Turn on to extract and describe images |
 | `MAX_CONCURRENT_GRADES` | `1` | Parallel grading workers |
 
 ## Tech Stack
 
-- **LLM Engine**: Dual-Redundant Routing (**Groq Llama 3.1 8B Instant** as primary (Gemini fallback disabled in Pakistan))
+- **LLM Engine**: Provider-routed fallback (**Groq primary, Gemini fallback**) with circuit-breaker recovery
 - **Vision**: Gemini API (for diagram understanding in PDFs/DOCX)
 - **Plagiarism**: Scikit-Learn (TF-IDF) + Character N-Gram Jaccard
 - **Reports**: Styled Excel output with `openpyxl`

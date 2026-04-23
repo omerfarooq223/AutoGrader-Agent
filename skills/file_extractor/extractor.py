@@ -10,9 +10,11 @@ import zipfile
 import os
 import tempfile
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import fitz  # PyMuPDF
 from docx import Document
+import openpyxl
 
 import config
 
@@ -49,9 +51,14 @@ def _describe_image(image_bytes: bytes) -> str | None:
                 ]
             )
 
-        # Image description is optional — fail fast, never retry
-        # Gemini quota death causes 4-minute freezes if retry_api_call is used
-        response = _call()
+        # Image description is optional — fail fast, never retry.
+        # Add explicit timeout to avoid hanging extraction on one image.
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(_call)
+        try:
+            response = future.result(timeout=10)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         return response.text.strip()
     except Exception as e:
         logger.debug(f"Vision API call failed for an image: {e}", exc_info=True)
@@ -370,6 +377,161 @@ def _infer_identity_for_group(files: list[dict], base_dir: str, lms_meta: dict) 
     }
 
 
+def _normalize_key(value: str) -> str:
+    """Normalize names/keys for robust roster matching."""
+    value = (value or "").strip().lower()
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[^a-z0-9 ]", "", value)
+    return value.strip()
+
+
+def load_student_roster(excel_path: str) -> list[dict]:
+    """
+    Load a student roster from Excel and return rows as:
+    [{"name": "...", "id": "..."}]
+
+    Header matching is heuristic and accepts common variants:
+    - Name: name, student name, full name
+    - ID: id, student id, roll no, registration no, reg no
+    """
+    wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+    ws = wb.active
+
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [str(h).strip().lower() if h is not None else "" for h in rows[0]]
+    name_idx = None
+    id_idx = None
+    for idx, header in enumerate(headers):
+        if name_idx is None and header in {"name", "student name", "full name"}:
+            name_idx = idx
+        if id_idx is None and header in {
+            "id", "student id", "roll no", "roll number", "registration no", "reg no"
+        }:
+            id_idx = idx
+
+    # Fallback header detection by token presence
+    if name_idx is None:
+        for idx, header in enumerate(headers):
+            if "name" in header:
+                name_idx = idx
+                break
+    if id_idx is None:
+        for idx, header in enumerate(headers):
+            if "id" in header or "roll" in header or "reg" in header:
+                id_idx = idx
+                break
+
+    if name_idx is None or id_idx is None:
+        raise ValueError(
+            "Roster Excel must include recognizable Name and ID columns in the first row."
+        )
+
+    roster: list[dict] = []
+    for row in rows[1:]:
+        if row is None:
+            continue
+        raw_name = row[name_idx] if name_idx < len(row) else None
+        raw_id = row[id_idx] if id_idx < len(row) else None
+        name = _normalize_name(str(raw_name or ""))
+        sid = str(raw_id or "").strip().upper()
+        if not name and not sid:
+            continue
+        if not name or not sid:
+            continue
+        roster.append({"name": name, "id": sid})
+    return roster
+
+
+def _build_roster_indexes(roster: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Build normalized lookup indexes for roster rows."""
+    by_name: dict[str, dict] = {}
+    by_id: dict[str, dict] = {}
+    for row in roster:
+        nkey = _normalize_key(row.get("name", ""))
+        ikey = str(row.get("id", "")).strip().upper()
+        if nkey:
+            by_name[nkey] = row
+        if ikey:
+            by_id[ikey] = row
+    return by_name, by_id
+
+
+def _extract_candidate_tokens(files: list[dict], base_dir: str, lms_meta: dict) -> tuple[set[str], set[str]]:
+    """Collect possible name/id tokens from paths only (never from document content)."""
+    names: set[str] = set()
+    ids: set[str] = set()
+
+    if lms_meta.get("student_name"):
+        names.add(_normalize_key(lms_meta["student_name"]))
+
+    for item in files:
+        stem = Path(item["filename"]).stem
+        maybe_name = _extract_name_from_text(stem)
+        maybe_id = _extract_id_from_text(stem)
+        if maybe_name:
+            names.add(_normalize_key(maybe_name))
+        if maybe_id:
+            ids.add(maybe_id.strip().upper())
+
+        rel_parts = Path(os.path.relpath(item["path"], base_dir)).parts[:-1]
+        for part in rel_parts:
+            folder_name = _extract_name_from_text(part)
+            folder_id = _extract_id_from_text(part)
+            if folder_name:
+                names.add(_normalize_key(folder_name))
+            if folder_id:
+                ids.add(folder_id.strip().upper())
+
+    return names, ids
+
+
+def _match_roster_identity(
+    files: list[dict],
+    base_dir: str,
+    lms_meta: dict,
+    roster_by_name: dict[str, dict],
+    roster_by_id: dict[str, dict],
+) -> dict:
+    """
+    Resolve identity from roster. IDs/names are always taken from roster rows.
+    Matching only inspects path-derived hints (filename/folder/LMS metadata),
+    never submission content.
+    """
+    candidate_names, candidate_ids = _extract_candidate_tokens(files, base_dir, lms_meta)
+
+    # 1) Exact ID match if any ID-like token appears in path metadata.
+    for cid in candidate_ids:
+        if cid in roster_by_id:
+            row = roster_by_id[cid]
+            return {"name": row["name"], "id": row["id"], "name_source": "roster", "id_source": "roster"}
+
+    # 2) Exact normalized name match.
+    for cname in candidate_names:
+        if cname in roster_by_name:
+            row = roster_by_name[cname]
+            return {"name": row["name"], "id": row["id"], "name_source": "roster", "id_source": "roster"}
+
+    # 3) Containment match for slight formatting differences.
+    for cname in candidate_names:
+        for roster_name_key, row in roster_by_name.items():
+            if cname and roster_name_key and (
+                cname in roster_name_key or roster_name_key in cname
+            ):
+                return {"name": row["name"], "id": row["id"], "name_source": "roster", "id_source": "roster"}
+
+    # Keep deterministic placeholders so downstream grading does not fall back
+    # to LLM/content-based identity extraction when roster mode is enabled.
+    return {
+        "name": "Unmatched Submission",
+        "id": "N/A",
+        "name_source": "roster_unmatched",
+        "id_source": "roster_unmatched",
+    }
+
+
 def read_file(file_path: str) -> str:
     """Read a single file based on its extension. Returns extracted text."""
     ext = Path(file_path).suffix.lower()
@@ -407,13 +569,20 @@ def _parse_lms_path(file_path: str, base_dir: str) -> dict:
         if assign_match:
             assignment_name = assign_match.group(1).title()
 
-        # Course code e.g. CC323
-        course_match = re.search(r"-([A-Z]{2,6}\d{3})-", part)
+        # Course code patterns: CC323, CS-101, EE 201
+        course_match = re.search(
+            r"\b([A-Z]{2,6}\s*-\s*\d{2,4}|[A-Z]{2,6}\s+\d{2,4}|[A-Z]{2,6}\d{2,4})\b",
+            part,
+        )
         if course_match:
-            course_code = course_match.group(1)
+            course_code = re.sub(r"\s+", " ", course_match.group(1).replace(" - ", "-")).strip()
 
-        # Semester e.g. F2025
-        sem_match = re.search(r"[\s\-]((?:F|S|SP|FA)\d{4})[\s\-]", part, re.IGNORECASE)
+        # Semester patterns: F2025, SP25, 2025-Spring, Spring-2025
+        sem_match = re.search(
+            r"\b((?:F|S|SP|FA)\d{2,4}|\d{4}\s*[-_/]\s*(?:spring|summer|fall|autumn)|(?:spring|summer|fall|autumn)\s*[-_/]\s*\d{4})\b",
+            part,
+            re.IGNORECASE,
+        )
         if sem_match:
             semester = sem_match.group(1).upper()
 
@@ -438,7 +607,14 @@ def _extract_nested_archives(directory: str, max_passes: int = 3) -> None:
                 continue
 
             for filename in files:
-                if Path(filename).suffix.lower() != ".zip":
+                ext = Path(filename).suffix.lower()
+                if ext in {".rar", ".7z"}:
+                    logger.warning(
+                        "Skipping unsupported nested archive %s — convert to ZIP.",
+                        os.path.join(root, filename),
+                    )
+                    continue
+                if ext != ".zip":
                     continue
 
                 zip_path = os.path.join(root, filename)
@@ -479,6 +655,7 @@ def _student_group_key(file_path: str, base_dir: str, lms_meta: dict) -> str:
 def collect_submissions(
     directory: str,
     exclude_filenames: list[str] | None = None,
+    student_roster: list[dict] | None = None,
 ) -> list[dict]:
     """
     Walk through an extracted submissions directory and read every
@@ -495,6 +672,7 @@ def collect_submissions(
     """
     exclude_set = {f.lower() for f in (exclude_filenames or [])}
     grouped: dict[str, dict] = {}
+    roster_by_name, roster_by_id = _build_roster_indexes(student_roster or [])
 
     # First expand any student-provided archive uploads (ZIP inside ZIP).
     _extract_nested_archives(directory)
@@ -511,6 +689,12 @@ def collect_submissions(
 
         for filename in sorted(files):
             ext = Path(filename).suffix.lower()
+            if ext in {".rar", ".7z"}:
+                logger.warning(
+                    "Skipping unsupported archive %s — convert it to ZIP.",
+                    os.path.join(root, filename),
+                )
+                continue
             if ext not in SUPPORTED_EXTENSIONS:
                 continue
 
@@ -567,7 +751,16 @@ def collect_submissions(
         group = grouped[group_key]
         files = sorted(group["files"], key=lambda f: f["rel_path"].lower())
         lms_meta = group["lms_meta"]
-        identity_meta = _infer_identity_for_group(files, directory, lms_meta)
+        if student_roster:
+            identity_meta = _match_roster_identity(
+                files=files,
+                base_dir=directory,
+                lms_meta=lms_meta,
+                roster_by_name=roster_by_name,
+                roster_by_id=roster_by_id,
+            )
+        else:
+            identity_meta = _infer_identity_for_group(files, directory, lms_meta)
 
         combined_parts = []
         combined_error = None
@@ -616,6 +809,7 @@ def collect_submissions(
 def extract_and_collect(
     zip_path: str,
     exclude_filenames: list[str] | None = None,
+    student_roster: list[dict] | None = None,
 ) -> tuple[list[dict], str]:
     """
     Extract a ZIP file and collect all supported submissions.
@@ -630,5 +824,9 @@ def extract_and_collect(
     exclude_filenames : Optional filenames to exclude (e.g. answer key filename).
     """
     extract_dir = extract_zip(zip_path)
-    submissions = collect_submissions(extract_dir, exclude_filenames=exclude_filenames)
+    submissions = collect_submissions(
+        extract_dir,
+        exclude_filenames=exclude_filenames,
+        student_roster=student_roster,
+    )
     return submissions, extract_dir

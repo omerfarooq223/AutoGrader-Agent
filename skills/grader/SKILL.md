@@ -29,7 +29,7 @@ Grades each student submission against the approved structured JSON rubric using
    - Build deduction text: `"CritName: reason (-N)"` where N = `max_score - score`.
    - If all criteria have full marks: `"No deductions."`.
 5. Student name comes from LMS folder structure (`lms_meta.student_name`), LLM is fallback only.
-6. Student ID is extracted by the LLM from file content.
+6. Student ID is taken from extracted identity metadata (roster/path/content precedence); LLM extraction is fallback only when metadata is missing.
 7. Save each result to cache immediately after grading.
 
 ## Concurrency

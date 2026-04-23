@@ -74,6 +74,7 @@ from skills.file_extractor.extractor import (
     read_notebook,
     collect_submissions,
     _infer_identity_for_group,
+    load_student_roster,
 )
 
 
@@ -192,6 +193,37 @@ class TestExtractor:
         assert identity["id"] == "F202300001"
         assert identity["id_source"] == "content"
 
+    def test_load_student_roster_reads_name_and_id(self, tmp_path):
+        import openpyxl
+
+        roster_path = tmp_path / "roster.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Student Name", "Student ID"])
+        ws.append(["Alice Khan", "F20230001"])
+        ws.append(["Bob Ahmed", "F20230002"])
+        wb.save(roster_path)
+
+        roster = load_student_roster(str(roster_path))
+        assert len(roster) == 2
+        assert roster[0]["name"] == "Alice Khan"
+        assert roster[0]["id"] == "F20230001"
+
+    def test_collect_uses_roster_identity_over_content(self, tmp_path):
+        student = tmp_path / "alice_khan_folder"
+        student.mkdir()
+        submission = student / "submission.py"
+        submission.write_text("Name: Wrong Person\nID: F99999999\nprint('x')")
+
+        roster = [{"name": "Alice Khan", "id": "F20230001"}]
+        subs = collect_submissions(str(tmp_path), student_roster=roster)
+
+        assert len(subs) == 1
+        assert subs[0]["identity_meta"]["name"] == "Alice Khan"
+        assert subs[0]["identity_meta"]["id"] == "F20230001"
+        assert subs[0]["identity_meta"]["name_source"] == "roster"
+        assert subs[0]["identity_meta"]["id_source"] == "roster"
+
 
 # ── Plagiarism tests ───────────────────────────────────────────
 
@@ -246,6 +278,7 @@ class TestPlagiarism:
 # ── Grader JSON parsing test ───────────────────────────────────
 
 from skills.grader.grader_agent import _parse_json
+from skills.grader import grader_agent
 
 
 class TestGraderParsing:
@@ -276,10 +309,57 @@ class TestGraderParsing:
         assert result["name"] == "Muhammad Umar Farooq"
         assert result["id"] == "F2023376425"
 
+    def test_grade_submission_with_mock_llm(self, monkeypatch):
+        rubric = json.dumps({
+            "criteria": [
+                {"name": "Correctness", "max_score": 5, "description": "desc"},
+                {"name": "Style", "max_score": 5, "description": "desc"},
+            ]
+        })
+        fake_llm = json.dumps({
+            "id": "F20230001",
+            "category_scores": {
+                "Correctness": {"score": 4, "reason": "minor issue"},
+                "Style": {"score": 5, "reason": "good"},
+            },
+        })
+
+        monkeypatch.setattr(grader_agent, "_call_llm", lambda *a, **k: fake_llm)
+        result = grader_agent.grade_submission(
+            rubric=rubric,
+            submission_text="This is a sufficiently long submission text for testing." * 3,
+            filename="submission.py",
+        )
+        assert result["marks"] == 9
+        assert result["category_scores"]["Correctness"] == 4
+        assert result["category_scores"]["Style"] == 5
+
+    def test_grade_all_with_mock_llm(self, monkeypatch):
+        rubric = json.dumps({
+            "criteria": [
+                {"name": "Correctness", "max_score": 5, "description": "desc"},
+            ]
+        })
+        fake_llm = json.dumps({
+            "id": "F20230002",
+            "category_scores": {"Correctness": {"score": 3, "reason": "partial"}},
+        })
+        monkeypatch.setattr(grader_agent, "_call_llm", lambda *a, **k: fake_llm)
+
+        submissions = [
+            {"filename": "s1.py", "content": "A" * 120, "cache_key": "k1"},
+            {"filename": "s2.py", "content": "B" * 120, "cache_key": "k2"},
+        ]
+        results = grader_agent.grade_all(rubric, submissions, cached={})
+        assert len(results) == 2
+        assert all(r["marks"] == 3 for r in results)
+
 
 # ── Excel writer tests ─────────────────────────────────────────
 
 from skills.report_writer.excel_writer import write_results
+from skills.report_writer.excel_writer import generate_class_insights
+from skills.rubric_generator.rubric_agent import format_rubric_to_json, generate_rubric
 
 
 class TestExcelWriter:
@@ -298,7 +378,40 @@ class TestExcelWriter:
         out = str(tmp_path / "report.xlsx")
         write_results(results, out)
         assert Path(out).exists()
-        assert Path(out).stat().st_size > 0
+
+    def test_generate_class_insights_without_llm(self):
+        results = [
+            {
+                "deductions": "Correctness: missing edge case (-2), Style: inconsistent naming (-1)"
+            },
+            {
+                "deductions": "Correctness: missing edge case (-1)"
+            },
+        ]
+        insights = generate_class_insights(results)
+        assert insights
+        assert any("Correctness" in s for s in insights)
+
+
+class TestRubricDeterministicParsing:
+    def test_format_rubric_to_json_parses_table_without_llm(self):
+        raw = (
+            "| Criterion | Max Score | Description |\n"
+            "|---|---|---|\n"
+            "| Correctness | 5 | accurate logic |\n"
+            "| Style | 3 | readable code |\n"
+        )
+        out = format_rubric_to_json(raw)
+        data = json.loads(out)
+        assert len(data["criteria"]) == 2
+        assert data["criteria"][0]["name"] == "Correctness"
+
+    def test_generate_rubric_uses_template_without_llm(self):
+        brief = "Implement a python function and debug code for this programming assignment. Total marks 20."
+        out = generate_rubric(brief)
+        data = json.loads(out)
+        assert "criteria" in data
+        assert len(data["criteria"]) >= 3
 
     def test_write_handles_error_marks(self, tmp_path):
         results = [

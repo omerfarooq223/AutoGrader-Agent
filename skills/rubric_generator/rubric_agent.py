@@ -101,6 +101,106 @@ def _match_template(brief_text: str) -> dict | None:
     return None
 
 
+def _default_band_description(criterion_name: str, max_score: float) -> str:
+    """Create deterministic fallback description bands when template descriptions are empty."""
+    criterion = criterion_name.strip() or "criterion"
+    full = int(round(max_score))
+    partial = max(1, int(round(max_score * 0.6)))
+    return (
+        f"[{full} Marks]: Fully satisfies {criterion.lower()} with complete, correct, and clearly presented work. "
+        f"[{partial} Marks]: Partially satisfies {criterion.lower()} but has omissions, inaccuracies, or weak explanation. "
+        f"[0 Marks]: Does not satisfy {criterion.lower()} or response is missing/incorrect."
+    )
+
+
+def _build_template_rubric_without_llm(template: dict, total_marks: int) -> dict:
+    """
+    Build rubric directly from template without LLM.
+    This reduces LLM dependency for common assignment types.
+    """
+    criteria = []
+    for c in template.get("criteria", []):
+        name = str(c.get("name", "")).strip() or "Criterion"
+        raw_max = c.get("max_score", 1)
+        try:
+            max_score = float(raw_max)
+        except (TypeError, ValueError):
+            max_score = 1.0
+        if max_score <= 0:
+            max_score = 1.0
+        desc = str(c.get("description", "") or "").strip()
+        if not desc:
+            desc = _default_band_description(name, max_score)
+        criteria.append({"name": name, "max_score": max_score, "description": desc})
+    rubric = {"criteria": criteria}
+    return _scale_rubric_criteria(rubric, total_marks)
+
+
+def _try_parse_table_rubric(rubric_text: str) -> dict | None:
+    """Deterministically parse rubric from CSV/markdown-like table text."""
+    lines = [ln.strip() for ln in rubric_text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+
+    pipe_lines = [ln for ln in lines if "|" in ln]
+    candidates = pipe_lines if len(pipe_lines) >= 2 else lines
+    rows = []
+    for ln in candidates:
+        if set(ln.replace("|", "").strip()) <= {"-", ":"}:
+            continue
+        parts = [p.strip() for p in (ln.strip("|").split("|") if "|" in ln else re.split(r"\s*,\s*", ln))]
+        if len(parts) >= 2:
+            rows.append(parts)
+    if len(rows) < 2:
+        return None
+
+    header = [h.lower() for h in rows[0]]
+    name_idx = next((i for i, h in enumerate(header) if "criterion" in h or "category" in h or "name" in h), None)
+    score_idx = next((i for i, h in enumerate(header) if "max" in h or "marks" in h or "score" in h), None)
+    desc_idx = next((i for i, h in enumerate(header) if "desc" in h or "detail" in h or "reason" in h), None)
+    if name_idx is None or score_idx is None:
+        return None
+
+    criteria = []
+    for row in rows[1:]:
+        if name_idx >= len(row) or score_idx >= len(row):
+            continue
+        name = row[name_idx].strip()
+        if not name:
+            continue
+        num_match = re.search(r"\d+(?:\.\d+)?", row[score_idx])
+        if not num_match:
+            continue
+        score = float(num_match.group())
+        desc = row[desc_idx].strip() if desc_idx is not None and desc_idx < len(row) else ""
+        if not desc:
+            desc = _default_band_description(name, score)
+        criteria.append({"name": name, "max_score": score, "description": desc})
+
+    return {"criteria": criteria} if criteria else None
+
+
+def _try_parse_line_rubric(rubric_text: str) -> dict | None:
+    """Parse simple line-based rubric like: 'Criterion: 10 - description'."""
+    criteria = []
+    for ln in rubric_text.splitlines():
+        line = ln.strip()
+        if not line:
+            continue
+        m = re.match(
+            r"^(?:[-*]\s*)?([A-Za-z][A-Za-z0-9 &/\-()]+?)\s*[:\-]\s*(\d+(?:\.\d+)?)\s*(?:marks?|pts?|points?)?\s*[:\-]?\s*(.*)$",
+            line,
+            re.IGNORECASE,
+        )
+        if not m:
+            continue
+        name = m.group(1).strip()
+        score = float(m.group(2))
+        desc = (m.group(3) or "").strip() or _default_band_description(name, score)
+        criteria.append({"name": name, "max_score": score, "description": desc})
+    return {"criteria": criteria} if criteria else None
+
+
 
 def _parse_rubric_json(raw: str) -> dict:
     """Extract and validate the structured rubric JSON from LLM output."""
@@ -160,29 +260,18 @@ def generate_rubric(brief_text: str) -> str:
     import config
 
     template = _match_template(brief_text)
+    total_marks = _extract_total_marks(
+        brief_text, getattr(config, "TOTAL_MARKS", 100)
+    )
 
     if template:
-        template_json = json.dumps(
-            {"criteria": template["criteria"]}, indent=2, ensure_ascii=False
+        logger.info(
+            "Using deterministic template rubric (no LLM): %s",
+            template.get("template_name", "unknown"),
         )
-        logger.info("Using rubric template: %s", template.get("template_name", "unknown"))
-
-        system_prompt = (
-            "You are an expert academic grading assistant. "
-            "You are given a rubric template and an assignment brief.\n\n"
-            "Your job is to:\n"
-            "- Keep the exact criterion names from the template.\n"
-            "- Adjust the max_score weights if needed so they fit this specific "
-            "assignment (they must still sum to the total marks).\n"
-            "- Write a detailed description for EACH criterion explaining criteria "
-            "for full marks, partial marks, and zero marks.\n\n"
-            "Respond ONLY with valid JSON — no markdown, no extra text:\n"
-            '{"criteria": [{"name": "...", "max_score": <number>, "description": "..."}, ...]}'
-        )
-        user_content = (
-            f"Rubric Template:\n{template_json}\n\n"
-            f"Assignment Brief:\n\n{brief_text}"
-        )
+        rubric_dict = _build_template_rubric_without_llm(template, total_marks)
+        result = json.dumps(rubric_dict, indent=2, ensure_ascii=False)
+        return _strip_marks_from_bands(result)
     else:
         logger.info("No matching rubric template; generating from scratch.")
 
@@ -209,9 +298,6 @@ def generate_rubric(brief_text: str) -> str:
     rubric_dict = _parse_rubric_json(raw)
 
     # Scale marks to match total found in brief
-    total_marks = _extract_total_marks(
-        brief_text, getattr(config, "TOTAL_MARKS", 100)
-    )
     rubric_dict = _scale_rubric_criteria(rubric_dict, total_marks)
 
     result = json.dumps(rubric_dict, indent=2, ensure_ascii=False)
@@ -224,7 +310,6 @@ def _strip_marks_from_bands(rubric_json_str: str) -> str:
     Prevents LLM from confusing band scores with deduction amounts during grading.
     Keeps the highest score as [Full], middle as [Partial], lowest as [Minimal].
     """
-    import re as _re
     try:
         obj = json.loads(rubric_json_str)
         for criterion in obj.get("criteria", []):
@@ -232,12 +317,12 @@ def _strip_marks_from_bands(rubric_json_str: str) -> str:
             if not desc:
                 continue
             # Find all [N Marks]: patterns and their positions
-            matches = list(_re.finditer(r"\[\d+\s*Marks?\]:", desc, _re.IGNORECASE))
+            matches = list(re.finditer(r"\[\d+\s*Marks?\]:", desc, re.IGNORECASE))
             if len(matches) >= 3:
                 # Sort by the number to assign Full/Partial/Minimal correctly
                 scored = sorted(
                     matches,
-                    key=lambda m: int(_re.search(r"\d+", m.group()).group()),
+                    key=lambda m: int(re.search(r"\d+", m.group()).group()),
                     reverse=True,
                 )
                 labels = ["[Full]:", "[Partial]:", "[Minimal]:"]
@@ -247,7 +332,7 @@ def _strip_marks_from_bands(rubric_json_str: str) -> str:
             elif len(matches) == 2:
                 scored = sorted(
                     matches,
-                    key=lambda m: int(_re.search(r"\d+", m.group()).group()),
+                    key=lambda m: int(re.search(r"\d+", m.group()).group()),
                     reverse=True,
                 )
                 for match, label in zip(scored, ["[Full]:", "[Minimal]:"]):
@@ -264,6 +349,21 @@ def format_rubric_to_json(rubric_text: str) -> str:
     extract it into a standardized JSON rubric.
     Never rewrite or change the names, allocations, or descriptions.
     """
+    # Deterministic parse path to reduce LLM dependency.
+    try:
+        parsed_json = _parse_rubric_json(rubric_text)
+        return _strip_marks_from_bands(json.dumps(parsed_json, indent=2, ensure_ascii=False))
+    except Exception:
+        pass
+
+    for parser in (_try_parse_table_rubric, _try_parse_line_rubric):
+        try:
+            parsed = parser(rubric_text)
+            if parsed and parsed.get("criteria"):
+                return _strip_marks_from_bands(json.dumps(parsed, indent=2, ensure_ascii=False))
+        except Exception:
+            continue
+
     system_prompt = (
         "You are an expert academic grading assistant. "
         "You will receive a grading rubric in any format (JSON, CSV table, "
