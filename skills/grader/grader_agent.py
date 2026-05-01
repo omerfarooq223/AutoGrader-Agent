@@ -30,9 +30,14 @@ from utils.llm_client import call_llm
 logger = logging.getLogger(__name__)
 
 
-def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> str:
+def _call_llm(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 2048,
+    json_mode: bool = False,
+) -> str:
     """Make a single Groq chat completion call."""
-    return call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
+    return call_llm(system_prompt, user_prompt, max_tokens=max_tokens, json_mode=json_mode)
 
 
 def _build_rubric_maxes(rubric: str | dict | None) -> dict[str, float]:
@@ -458,6 +463,7 @@ def grade_submission(
         prompt,
         cancel_event=cancel_event,
         max_tokens=GRADING_MAX_OUTPUT_TOKENS,
+        json_mode=True,
     )
     return _parse_json(
         raw,

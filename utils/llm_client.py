@@ -37,12 +37,34 @@ def _call_groq(system_prompt: str, user_prompt: str, model: str, max_tokens: int
     return response.choices[0].message.content.strip()
 
 
+def _call_groq_json(system_prompt: str, user_prompt: str, model: str, max_tokens: int) -> str:
+    """Groq call with strict JSON response format."""
+    from groq import Groq
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise EnvironmentError("GROQ_API_KEY not set.")
+    client = Groq(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.0,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+        timeout=30.0,
+    )
+    return response.choices[0].message.content.strip()
+
+
 # ── Gemini ───────────────────────────────────────────────────────
 def _call_gemini(
     system_prompt: str,
     user_prompt: str,
     max_tokens: int,
     model_name: str | None = None,
+    json_mode: bool = False,
 ) -> str:
     try:
         from google import genai
@@ -65,16 +87,23 @@ def _call_gemini(
     selected_model = model_name or config.GEMINI_MODEL
     logger.info("Calling Gemini with model: %s", selected_model)
     
+    gen_cfg = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        max_output_tokens=max_tokens,
+        temperature=0.0,
+    )
+    if json_mode:
+        gen_cfg.response_mime_type = "application/json"
+
     response = client.models.generate_content(
         model=selected_model,
         contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            max_output_tokens=max_tokens,
-            temperature=0.0,
-        ),
+        config=gen_cfg,
     )
-    return response.text.strip()
+    text = (response.text or "").strip()
+    if not text:
+        raise RuntimeError("LLM returned empty response text.")
+    return text
 
 
 
@@ -159,6 +188,7 @@ def call_llm(
     user_prompt: str,
     model: str = None,
     max_tokens: int = 2048,
+    json_mode: bool = False,
 ) -> str:
     import config
     import re
@@ -174,7 +204,10 @@ def call_llm(
                 logger.warning("GROQ_API_KEY missing — skipping Groq.")
             else:
                 logger.info("Attempting Groq with model: %s", groq_model)
-                result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
+                if json_mode:
+                    result = _call_groq_json(system_prompt, user_prompt, groq_model, max_tokens)
+                else:
+                    result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
                 _record_success("groq")
                 logger.info("✓ Groq succeeded")
                 return result
@@ -195,7 +228,10 @@ def call_llm(
                     logger.warning("Groq requested wait: %.1fs. Retrying once...", wait)
                     time.sleep(wait)
                     try:
-                        result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
+                        if json_mode:
+                            result = _call_groq_json(system_prompt, user_prompt, groq_model, max_tokens)
+                        else:
+                            result = _call_groq(system_prompt, user_prompt, groq_model, max_tokens)
                         _record_success("groq")
                         logger.info("✓ Groq succeeded after retry")
                         return result
@@ -215,7 +251,13 @@ def call_llm(
         for gem_model in gemini_models:
             try:
                 logger.info("Attempting Gemini fallback with model: %s", gem_model)
-                result = _call_gemini(system_prompt, user_prompt, max_tokens, model_name=gem_model)
+                result = _call_gemini(
+                    system_prompt,
+                    user_prompt,
+                    max_tokens,
+                    model_name=gem_model,
+                    json_mode=json_mode,
+                )
                 _record_success("gemini")
                 logger.info("✓ Gemini succeeded with model: %s", gem_model)
                 return result
