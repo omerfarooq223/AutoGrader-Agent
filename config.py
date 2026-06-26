@@ -31,6 +31,11 @@ GRADING_MAX_OUTPUT_TOKENS: int = int(os.environ.get("GRADING_MAX_OUTPUT_TOKENS",
 MAX_SUBMISSION_CHARS: int = int(os.environ.get("MAX_SUBMISSION_CHARS", "0"))
 MAX_ANSWER_KEY_CHARS: int = int(os.environ.get("MAX_ANSWER_KEY_CHARS", "0"))
 MAX_RUBRIC_CHARS: int = int(os.environ.get("MAX_RUBRIC_CHARS", "0"))
+CHUNKED_GRADING_CHAR_LIMIT: int = int(os.environ.get("CHUNKED_GRADING_CHAR_LIMIT", "45000"))
+CHUNKED_GRADING_CHUNK_CHARS: int = int(os.environ.get("CHUNKED_GRADING_CHUNK_CHARS", "22000"))
+CHUNKED_GRADING_OVERLAP_CHARS: int = int(os.environ.get("CHUNKED_GRADING_OVERLAP_CHARS", "1200"))
+CHUNKED_EVIDENCE_AGGREGATION_CHAR_LIMIT: int = int(os.environ.get("CHUNKED_EVIDENCE_AGGREGATION_CHAR_LIMIT", "36000"))
+CHUNKED_EVIDENCE_GROUP_SIZE: int = int(os.environ.get("CHUNKED_EVIDENCE_GROUP_SIZE", "8"))
 
 # ── Plagiarism ──────────────────────────────────────────────────
 SIMILARITY_THRESHOLD: float = float(os.environ.get("SIMILARITY_THRESHOLD", "0.65"))

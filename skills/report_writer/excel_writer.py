@@ -11,7 +11,9 @@ import statistics
 
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.formatting.rule import DataBarRule
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from config import PASS_THRESHOLD, TOTAL_MARKS
 
@@ -20,21 +22,25 @@ logger = logging.getLogger(__name__)
 
 # ── Styling constants ───────────────────────────────────────────
 _HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
-_HEADER_FILL = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
-_SUBHEADER_FILL = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+_HEADER_FILL = PatternFill(start_color="1D4ED8", end_color="1D4ED8", fill_type="solid")
+_SUBHEADER_FILL = PatternFill(start_color="0F766E", end_color="0F766E", fill_type="solid")
 _PASS_FILL   = PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid")
-_PASS_FONT   = Font(color="166534")
-_FAIL_FILL   = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
-_FAIL_FONT   = Font(color="991B1B")
+_PASS_FONT   = Font(color="166534", bold=True)
+_FAIL_FILL   = PatternFill(start_color="FFE4E6", end_color="FFE4E6", fill_type="solid")
+_FAIL_FONT   = Font(color="9F1239", bold=True)
 
-_FLAG_FONT   = Font(color="DC2626", bold=True)
-_FLAG_FILL   = PatternFill(start_color="FEF2F2", end_color="FEF2F2", fill_type="solid")
+_FLAG_FONT   = Font(color="B91C1C", bold=True)
+_FLAG_FILL   = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
 
 _THIN_BORDER = Border(
     left=Side(style="thin", color="CBD5E1"), right=Side(style="thin", color="CBD5E1"),
     top=Side(style="thin", color="CBD5E1"),  bottom=Side(style="thin", color="CBD5E1"),
 )
 _ALT_ROW_FILL = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+_BODY_FONT = Font(color="0F172A", size=10)
+_MUTED_FONT = Font(color="475569", size=10)
+_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_TOP = Alignment(vertical="top", wrap_text=True)
 
 
 def _shorten_flag(flag: str) -> str:
@@ -138,7 +144,7 @@ def _auto_width(ws) -> None:
         col_letter = get_column_letter(col[0].column)
         is_number_col = True
         for cell in col:
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            cell.alignment = _TOP
             if cell.value:
                 val = cell.value
                 if not isinstance(val, (int, float)):
@@ -149,6 +155,40 @@ def _auto_width(ws) -> None:
     for row in ws.iter_rows():
         ws.row_dimensions[row[0].row].height = max(
             ws.row_dimensions[row[0].row].height or 0, 30
+        )
+
+
+def _add_table(ws, table_name: str, last_row: int, last_col: int, style: str) -> None:
+    """Apply an Excel table style over the populated area."""
+    if last_row < 2 or last_col < 1:
+        return
+    ref = f"A1:{get_column_letter(last_col)}{last_row}"
+    table = Table(displayName=table_name, ref=ref)
+    table.tableStyleInfo = TableStyleInfo(
+        name=style,
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws.add_table(table)
+
+
+def _add_score_bars(ws, start_row: int, end_row: int, columns: list[int]) -> None:
+    """Add subtle data bars to numeric score columns."""
+    if end_row < start_row:
+        return
+    for col in columns:
+        letter = get_column_letter(col)
+        ws.conditional_formatting.add(
+            f"{letter}{start_row}:{letter}{end_row}",
+            DataBarRule(
+                start_type="num",
+                start_value=0,
+                end_type="max",
+                color="60A5FA",
+                showValue=True,
+            ),
         )
 
 
@@ -180,21 +220,26 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict], sheet_title
         cell = ws.cell(row=1, column=col_idx, value=header)
         cell.font      = _HEADER_FONT
         cell.fill      = _HEADER_FILL
-        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+        cell.alignment = _CENTER
         cell.border    = _THIN_BORDER
+    ws.row_dimensions[1].height = 36
 
     # Data rows
     for row_idx, entry in enumerate(results, start=2):
         col = 1
 
-        ws.cell(row=row_idx, column=col, value=entry.get("name", ""))
+        name_cell = ws.cell(row=row_idx, column=col, value=entry.get("name", ""))
+        name_cell.font = _BODY_FONT
         col += 1
-        ws.cell(row=row_idx, column=col, value=entry.get("id", ""))
+        id_cell = ws.cell(row=row_idx, column=col, value=entry.get("id", ""))
+        id_cell.font = _MUTED_FONT
+        id_cell.alignment = _CENTER
         col += 1
 
         # Marks with pass/fail colouring
         marks = entry.get("marks", "")
         marks_cell = ws.cell(row=row_idx, column=col, value=marks)
+        marks_cell.alignment = _CENTER
         col += 1
         if isinstance(marks, (int, float)):
             if marks >= pass_mark:
@@ -212,21 +257,28 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict], sheet_title
             if value is None:
                 stripped = cat.strip("[]")
                 value = cat_scores.get(stripped, "")
-            ws.cell(row=row_idx, column=col, value=value)
+            score_cell = ws.cell(row=row_idx, column=col, value=value)
+            score_cell.alignment = _CENTER
+            score_cell.font = _BODY_FONT
             col += 1
 
         # Deductions — now built deterministically by Python in grader_agent
         deductions = entry.get("deductions", "") or "No deductions."
-        ws.cell(row=row_idx, column=col, value=deductions)
+        deduction_cell = ws.cell(row=row_idx, column=col, value=deductions)
+        deduction_cell.font = _BODY_FONT
+        deduction_cell.alignment = _TOP
         col += 1
 
         # Plagiarism flag — shortened
         raw_flag  = entry.get("plagiarism_flag", "")
         short_flag = _shorten_flag(raw_flag)
         flag_cell  = ws.cell(row=row_idx, column=col, value=short_flag)
+        flag_cell.alignment = _TOP
         if short_flag:
             flag_cell.font = _FLAG_FONT
             flag_cell.fill = _FLAG_FILL
+        else:
+            flag_cell.font = _MUTED_FONT
 
         # Borders and zebra striping
         is_even = (row_idx % 2 == 0)
@@ -237,7 +289,24 @@ def _write_grading_sheet(wb: openpyxl.Workbook, results: list[dict], sheet_title
             if is_even and cell.fill.fill_type is None:
                 cell.fill = _ALT_ROW_FILL
 
+    last_row = len(results) + 1
+    last_col = len(headers)
+    score_columns = [3] + list(range(4, 4 + len(categories)))
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(last_col)}{last_row}"
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = "2563EB"
+    _add_table(ws, "GradingReportTable", last_row, last_col, "TableStyleMedium2")
+    _add_score_bars(ws, 2, last_row, score_columns)
     _auto_width(ws)
+    ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 0, 24)
+    ws.column_dimensions["B"].width = max(ws.column_dimensions["B"].width or 0, 16)
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions[get_column_letter(last_col - 1)].width = 70
+    ws.column_dimensions[get_column_letter(last_col)].width = 50
+    for row in ws.iter_rows(min_row=2, max_row=last_row):
+        for idx in score_columns:
+            row[idx - 1].alignment = _CENTER
 
 
 def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict],
@@ -324,24 +393,39 @@ def _write_stats_sheet(wb: openpyxl.Workbook, results: list[dict],
         cell.font   = _HEADER_FONT
         cell.fill   = _HEADER_FILL
         cell.border = _THIN_BORDER
+        cell.alignment = _CENTER
+    ws.row_dimensions[1].height = 34
 
     for row_idx, (metric, value) in enumerate(stats_data, start=2):
         c1 = ws.cell(row=row_idx, column=1, value=metric)
         c2 = ws.cell(row=row_idx, column=2, value=value)
         c1.border = _THIN_BORDER
         c2.border = _THIN_BORDER
+        c1.font = _BODY_FONT
+        c2.font = _BODY_FONT
+        c1.alignment = _TOP
+        c2.alignment = _TOP
 
         if metric in ("Failed Submissions", "Grade Distribution", "Report Metadata"):
             c1.font = _HEADER_FONT
             c1.fill = _SUBHEADER_FILL
             c2.font = _HEADER_FONT
             c2.fill = _SUBHEADER_FILL
+            c1.alignment = _CENTER
+            c2.alignment = _CENTER
         elif row_idx % 2 == 0:
             c1.fill = _ALT_ROW_FILL
             c2.fill = _ALT_ROW_FILL
 
     last_row = len(stats_data) + 1
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:B{last_row}"
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = "0F766E"
+    _add_table(ws, "SummaryStatisticsTable", last_row, 2, "TableStyleMedium4")
     _auto_width(ws)
+    ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 0, 34)
+    ws.column_dimensions["B"].width = max(ws.column_dimensions["B"].width or 0, 42)
     return ws, last_row
 
 
@@ -356,17 +440,24 @@ def _write_insights_section(ws, start_row: int, insights: list[str]) -> None:
 
     row = start_row + 2  # blank separator
     cell = ws.cell(row=row, column=1, value="Class Insights — Top 3 Common Mistakes")
-    cell.font   = Font(bold=True, size=11, color="7F6000")
+    cell.font   = Font(bold=True, size=11, color="92400E")
     cell.fill   = _INSIGHT_FILL
     cell.border = _THIN_BORDER
+    cell.alignment = _CENTER
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
     ws.cell(row=row, column=2).border = _THIN_BORDER
     ws.cell(row=row, column=2).fill   = _INSIGHT_FILL
 
     for i, insight in enumerate(insights, start=1):
         row += 1
-        ws.cell(row=row, column=1, value=f"#{i}").border  = _THIN_BORDER
-        ws.cell(row=row, column=2, value=insight).border  = _THIN_BORDER
+        idx_cell = ws.cell(row=row, column=1, value=f"#{i}")
+        insight_cell = ws.cell(row=row, column=2, value=insight)
+        idx_cell.border = _THIN_BORDER
+        insight_cell.border = _THIN_BORDER
+        idx_cell.font = Font(bold=True, color="92400E")
+        idx_cell.alignment = _CENTER
+        insight_cell.font = _BODY_FONT
+        insight_cell.alignment = _TOP
 
 
 from typing import Union
