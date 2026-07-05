@@ -39,11 +39,13 @@ Generates the final Excel grading report with styled formatting, per-criterion b
 - **Class Insights** — Top 3 most common mistakes across all students, generated deterministically by frequency analysis of deduction criteria/reasons. Styled with gold highlighting.
 
 ## Styling
-- Blue header row with white bold text
-- Green/red conditional fill on marks (pass/fail threshold from config)
-- Red bold font on plagiarism flags
-- Thin borders on all cells
-- Auto-fit column widths
+- Light teacher-friendly workbook styling
+- Blue header rows with white bold text
+- Excel table formatting, filters, frozen header rows, and hidden gridlines
+- Green/red pass/fail emphasis on marks
+- Subtle score data bars for numeric score columns
+- Highlighted plagiarism flags
+- Thin borders, zebra rows, and teacher-readable column widths
 
 ## Key Functions
 - `_generate_class_insights(results)` — deterministic extraction of top 3 common mistakes from deduction patterns

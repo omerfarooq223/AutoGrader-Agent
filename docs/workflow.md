@@ -4,6 +4,25 @@
 
 This document describes the end-to-end workflow of the AutoGrader agent, from input to final report.
 
+```mermaid
+flowchart TD
+    Config["Load configuration"] --> Brief["Read assignment brief"]
+    Brief --> Rubric["Generate or accept rubric"]
+    Rubric --> AnswerKey["Optional answer key"]
+    AnswerKey --> Extract["Extract submissions"]
+    Extract --> Grade["Grade with prompt-injection protection"]
+    Grade --> LargeCheck{"Prompt too large?"}
+    LargeCheck -- "No" --> Parse["Parse JSON + compute scores"]
+    LargeCheck -- "Yes" --> Chunk["Chunk submission + extract evidence"]
+    Chunk --> Hierarchy{"Evidence too large?"}
+    Hierarchy -- "Yes" --> Compact["Hierarchical evidence compaction"]
+    Hierarchy -- "No" --> FinalGrade["Final evidence aggregation"]
+    Compact --> FinalGrade
+    FinalGrade --> Parse
+    Parse --> Similarity["Plagiarism detection"]
+    Similarity --> Report["Styled Excel report"]
+```
+
 ---
 
 ## Pipeline Steps
@@ -16,7 +35,7 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 ### Step 2: Assignment Brief Ingestion
 - The brief file is read using `file_extractor/extractor.py`.
-- Supports PDF, DOCX, .py, .cpp, and .ipynb formats.
+- Supports PDF, DOCX, .py, .cpp, .ipynb, .md, and .txt formats.
 - The extracted text is passed to the rubric generator.
 
 ### Step 3: Rubric Generation & Approval
@@ -40,13 +59,17 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 ### Step 4: Answer Key (Optional)
 - The user can provide an answer key via file upload or manual paste.
-- In Streamlit, users can explicitly click **Skip — Grade with Rubric Only**.
+- In the JavaScript web UI, users can leave answer key fields empty to grade with rubric only.
 - If provided, each submission is graded by comparing it against the answer key alongside the rubric — improving accuracy significantly for factual and code assignments.
 - The answer key filename is excluded from the submissions list automatically so the answer key author is never graded as a student.
 
 ### Step 5: Submission Extraction
 - The ZIP file is extracted to a **per-session temp directory** named `.autograder_<zipname>/` in the ZIP's parent folder. This prevents cache collisions when grading multiple classes from the same directory.
 - Zip-slip security check rejects unsafe archive entries (path traversal attack prevention).
+- Student-provided nested archives are expanded before reading files:
+  - Nested `.zip` uses Python's standard library.
+  - Nested `.rar` and `.7z` use local tools when available (`bsdtar`/libarchive or `7z`).
+  - Archive member paths are validated before extraction to reduce path traversal risk.
 - All supported files are discovered via recursive directory walk.
 - Hidden/system directories (`__MACOSX`, `.git`, `__pycache__`) are skipped.
 - Files exceeding **20MB** are skipped with a clear error message stored as the submission content — prevents LLM context overflow.
@@ -54,9 +77,9 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - **Format-specific extraction:**
   - **PDF**: Text extracted page by page via PyMuPDF.
   - **DOCX**: Paragraphs and **table content** both extracted (tables are not in `doc.paragraphs` and were previously invisible to the grader).
-  - **.py / .cpp**: Read as plain text.
+  - **.py / .cpp / .md / .txt**: Read as plain text.
   - **.ipynb**: Code cells, markdown cells, and **cell outputs** (print results, errors, return values) all extracted — output is critical for grading whether code actually ran correctly.
-- **Unsupported archives**: `.rar` / `.7z` submissions are skipped with a warning to convert to ZIP.
+- **RAR/7z without extractor**: If no compatible local extraction tool is available, the submission receives a clear archive extraction error and the teacher can ask the student to resubmit as ZIP.
 - **Image extraction** (only when `EXTRACT_IMAGES=True`): Embedded images sent to Gemini Vision for description. Fails fast on quota exhaustion — never retries image description, so a dead Gemini quota does not freeze the pipeline.
 - `extract_and_collect` returns `(submissions, extract_dir)`. The caller is responsible for cleaning up `extract_dir` **after** grading completes, so the cache file survives for crash recovery during long grading sessions.
 - **Student identity extraction precedence** (name + ID) is deterministic and done before grading:
@@ -65,6 +88,8 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 
 ### Step 6: Grading
 - Each submission + the structured JSON rubric (+ answer key if provided) is sent via `utils/llm_client.py` using configured provider/model routing (Groq primary with Gemini fallback).
+- **Prompt-injection protection**: Student submission content is wrapped as untrusted data before being sent to the model. The system prompts explicitly instruct the LLM to ignore any commands, role-play, hidden text, or grading instructions inside student-authored content.
+- **Large submissions**: If a prompt is too large, grading switches to overlapping chunks. Each chunk is evaluated for compact evidence, then the evidence is aggregated into one final per-criterion grade. For extremely large submissions, evidence is compacted hierarchically in ordered batches before final grading.
 - **Student name + ID**: The grader consumes pre-extracted identity metadata from extraction step (filename → folder → content precedence). LLM identity output is now fallback-only when extraction cannot infer values.
 - **LLM response**: The LLM returns per-criterion scores and brief reasons only: `{id, category_scores: {CritName: {score, reason}}}`. The LLM does NOT calculate totals, write `(-N)` amounts, or format deduction strings.
 - **Deterministic Python scoring** (all math done in Python, never by the LLM):
@@ -87,7 +112,9 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
   1. **TF-IDF Cosine Similarity** — vocabulary overlap
   2. **Character 4-gram Jaccard** — structural overlap
 - Combined score: `0.6 × cosine + 0.4 × n-gram`
-- Pairs scoring ≥ 65% similarity are flagged.
+- Pairs scoring at or above the selected threshold are flagged. The default is 65%.
+- In the JavaScript UI, teachers can choose a threshold per grading run. Higher thresholds are stricter and reduce false positives; lower thresholds catch more possible copying but require more teacher review.
+- Teachers can also set an optional mark penalty. The penalty is applied once per flagged student, not once per matched pair. A penalty of `0` keeps plagiarism as report-only.
 - **Flags preserve student names**: the plagiarism flag for each student lists exactly who they matched and at what percentage (e.g. `⚠️ Similar to: ali.pdf (96%), sara.docx (88%)`).
 - Uses `cache_key` for matching — works correctly even when multiple students submitted files with identical filenames.
 - No API calls — runs entirely locally using scikit-learn.
@@ -104,11 +131,47 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 - The grading cache is cleared only **after** the report is successfully written — a crash during report generation does not lose grading progress.
 
 ### Step 9: Results UI Analytics & Manual Override
-- In Streamlit Step 5, results render two side-by-side charts:
+- In the legacy Streamlit Step 5, results render two side-by-side charts:
   - **Score Distribution** (bar chart): score values on X-axis, student count on Y-axis.
   - **Average Score per Criterion** (horizontal bars): criterion means with threshold colors based on rubric max score.
 - Teachers can edit per-student criterion scores directly in the UI table.
 - On **Apply score overrides**, totals are recalculated, in-memory results are updated, and the downloadable Excel report is regenerated immediately.
+
+### Step 10: JavaScript Web UI
+- `web_ui/server.py` serves the light-theme JavaScript UI and a small local HTTP API.
+- The UI has two focused workflows:
+  1. **Grade assignments** — uploads submissions ZIP, brief, optional roster, optional answer key, and optional manual rubric; runs the existing Python grading pipeline as a background job; returns the styled Excel report.
+  2. **Viva questions** — uploads a project proposal/report; generates project-specific viva questions and concise teacher hints.
+- Background jobs expose progress polling through `/api/jobs/<job_id>`, so long grading runs do not freeze the browser.
+- The UI does not duplicate grading logic. It calls the same extractor, rubric generator, grader, plagiarism detector, report writer, and viva generator modules used elsewhere.
+
+```mermaid
+sequenceDiagram
+    actor Teacher
+    participant Browser as JavaScript UI
+    participant API as Local Python API
+    participant Job as Background Job
+    participant Engine as AutoGrader Engine
+
+    Teacher->>Browser: Upload files and start workflow
+    Browser->>API: POST /api/grade or /api/viva
+    API->>Job: Create job
+    Browser->>API: Poll /api/jobs/:id
+    Job->>Engine: Run grading or viva generation
+    Engine-->>Job: Result
+    API-->>Browser: Progress and final result
+    Browser-->>Teacher: Download report or view viva questions
+```
+
+### Step 11: Viva Question Generation
+- Project proposal/report files are read with the same extractor used for assignment briefs.
+- The project document is wrapped as untrusted data before the LLM sees it.
+- `skills/viva_generator/viva_agent.py` asks the LLM for structured JSON:
+  - `project_name`
+  - `questions`
+  - `notes`
+- Each viva question includes category, difficulty, question text, and a short `what_to_listen_for` hint for the teacher.
+- The feature is intended for oral evaluation preparation, not automated scoring.
 
 ---
 
@@ -127,8 +190,11 @@ This document describes the end-to-end workflow of the AutoGrader agent, from in
 | Individual criterion score > max_score | Capped to rubric max by Python |
 | Stale cache from old scoring format | Auto-discarded via cache version check |
 | File too large (> 20MB) | Skipped with student-facing error message; grader sees it, scores 0 |
+| Submission contains prompt injection | Treated as untrusted content; instructions inside the submission are explicitly ignored |
+| Chunk evidence too large to aggregate once | Compacted through hierarchical ordered evidence summaries before final grading |
 | Corrupt/unreadable file | Error stored as content; submission not silently dropped |
-| Unsupported file format in ZIP | Skipped (unsupported `.rar` / `.7z` archives emit conversion warning) |
+| RAR/7z submitted without local extractor | Clear archive extraction error; student may need to resubmit as ZIP |
+| Unsupported file format in ZIP | Skipped unless it is a supported nested archive |
 | Unsafe ZIP entries (zip-slip) | Rejected with ValueError before extraction |
 | Duplicate filenames in ZIP | Handled via content-hash `cache_key` — no result collisions |
 | Answer key file left in ZIP | Excluded by filename stem matching before grading |

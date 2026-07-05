@@ -20,7 +20,7 @@ from skills.file_extractor.extractor import extract_and_collect, read_file, load
 from skills.rubric_generator.rubric_agent import generate_rubric
 from skills.grader.grader_agent import grade_all
 from utils.cache import load_cache, save_cache, clear_cache
-from skills.plagiarism_detector.plagiarism_agent import check_plagiarism, apply_flags
+from skills.plagiarism_detector.plagiarism_agent import check_plagiarism, apply_flags_and_penalty
 from skills.report_writer.excel_writer import write_results, shorten_plagiarism_flag
 
 # ── Page config (must be first Streamlit call) ──────────────────
@@ -50,6 +50,8 @@ _DEFAULTS = {
     "rubric_key_v": 0,
     "lms_meta": {},
     "plagiarism_enabled": True,
+    "plagiarism_threshold": 65,
+    "plagiarism_penalty": 0,
     "student_roster_uploaded_filename": None,
 }
 
@@ -939,6 +941,26 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
             help="Dual-similarity analysis (TF-IDF + N-Grams). Skip to save time.",
             disabled=st.session_state.grading_in_progress,
         )
+        if st.session_state.plagiarism_enabled:
+            p1, p2 = st.columns(2)
+            with p1:
+                st.session_state.plagiarism_threshold = st.number_input(
+                    "Flag threshold (%)",
+                    min_value=0,
+                    max_value=100,
+                    value=int(st.session_state.plagiarism_threshold),
+                    help="Minimum combined similarity needed before submissions are flagged. Higher is stricter; lower catches more possible copying.",
+                    disabled=st.session_state.grading_in_progress,
+                )
+            with p2:
+                st.session_state.plagiarism_penalty = st.number_input(
+                    "Marks to deduct if flagged",
+                    min_value=0.0,
+                    value=float(st.session_state.plagiarism_penalty),
+                    step=0.5,
+                    help="Applied once per flagged student. Use 0 to report plagiarism without changing marks.",
+                    disabled=st.session_state.grading_in_progress,
+                )
 
     if start_btn:
         st.session_state.grading_in_progress = True
@@ -1030,8 +1052,16 @@ if st.session_state.rubric_approved and st.session_state.answer_key_approved and
 
             if st.session_state.plagiarism_enabled:
                 with st.spinner("Running plagiarism check…"):
-                    flags = check_plagiarism(submissions, results)
-                    results = apply_flags(results, flags)
+                    flags = check_plagiarism(
+                        submissions,
+                        results,
+                        threshold=st.session_state.plagiarism_threshold,
+                    )
+                    results = apply_flags_and_penalty(
+                        results,
+                        flags,
+                        penalty_marks=st.session_state.plagiarism_penalty,
+                    )
             else:
                 st.info("Plagiarism analysis skipped (disabled in sidebar).")
 

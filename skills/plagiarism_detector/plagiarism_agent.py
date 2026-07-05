@@ -48,7 +48,24 @@ def _ngram_jaccard(text_a: str, text_b: str, n: int = 4) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
-def check_plagiarism(submissions: list, results: Optional[list] = None) -> dict:
+def _normalize_threshold(threshold: float | int | str | None) -> float:
+    """Return a similarity threshold as a 0.0-1.0 ratio."""
+    if threshold is None:
+        return SIMILARITY_THRESHOLD
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError):
+        return SIMILARITY_THRESHOLD
+    if value > 1:
+        value = value / 100.0
+    return max(0.0, min(value, 1.0))
+
+
+def check_plagiarism(
+    submissions: list,
+    results: Optional[list] = None,
+    threshold: float | int | str | None = None,
+) -> dict:
     """
     Compare all submission pairs using a combined similarity score:
       combined = 0.6 * cosine_similarity + 0.4 * ngram_jaccard
@@ -59,6 +76,9 @@ def check_plagiarism(submissions: list, results: Optional[list] = None) -> dict:
         Each dict must have keys: filename, content, and optionally cache_key.
     results : list[dict] | None
         Optional. The graded results list containing the 'name' field for each student.
+    threshold : float | int | str | None
+        Similarity threshold for flagging. Accepts a ratio (0.65) or percent (65).
+        Defaults to config.SIMILARITY_THRESHOLD.
 
     Returns
     -------
@@ -66,6 +86,8 @@ def check_plagiarism(submissions: list, results: Optional[list] = None) -> dict:
         Mapping of cache_key -> list of descriptive flag strings.
         Only files involved in a flagged pair appear as keys.
     """
+    active_threshold = _normalize_threshold(threshold)
+
     # Filter to gradeable submissions only — error placeholders skew results
     gradeable = [
         s for s in submissions
@@ -119,7 +141,7 @@ def check_plagiarism(submissions: list, results: Optional[list] = None) -> dict:
             ngram_score = _ngram_jaccard(contents[i], contents[j])
             combined   = 0.6 * cos_score + 0.4 * ngram_score
 
-            if combined >= SIMILARITY_THRESHOLD:
+            if combined >= active_threshold:
                 pct    = f"{combined * 100:.1f}%"
                 detail = f"cos={cos_score:.0%} ngram={ngram_score:.0%}"
                 flags.setdefault(keys[i], []).append(
@@ -153,5 +175,44 @@ def apply_flags(results: list[dict], flags: dict[str, list[str]]) -> list[dict]:
         key     = entry.get("cache_key", entry.get("filename", ""))
         matched = flags.get(key, [])
         new_entry["plagiarism_flag"] = " | ".join(matched) if matched else ""
+        updated.append(new_entry)
+    return updated
+
+
+def apply_flags_and_penalty(
+    results: list[dict],
+    flags: dict[str, list[str]],
+    penalty_marks: float | int | str | None = 0,
+) -> list[dict]:
+    """
+    Return results with plagiarism flags and an optional one-time mark penalty.
+
+    The penalty is applied once per flagged student, not once per matched pair.
+    This keeps policy predictable when a submission is similar to multiple files.
+    """
+    try:
+        penalty = max(0.0, float(penalty_marks or 0))
+    except (TypeError, ValueError):
+        penalty = 0.0
+
+    updated = []
+    for entry in apply_flags(results, flags):
+        new_entry = dict(entry)
+        if penalty and new_entry.get("plagiarism_flag") and isinstance(new_entry.get("marks"), (int, float)):
+            original = new_entry["marks"]
+            adjusted = max(0, original - penalty)
+            new_entry["marks"] = int(adjusted) if adjusted == int(adjusted) else adjusted
+            penalty_display = int(penalty) if penalty == int(penalty) else penalty
+            existing = new_entry.get("deductions", "") or ""
+            penalty_text = f"Plagiarism policy: similarity flag penalty (-{penalty_display})"
+            new_entry["deductions"] = (
+                penalty_text
+                if not existing or existing == "No deductions."
+                else f"{existing}, {penalty_text}"
+            )
+            new_entry["plagiarism_penalty"] = penalty_display
+            new_entry["plagiarism_original_marks"] = original
+        else:
+            new_entry["plagiarism_penalty"] = 0
         updated.append(new_entry)
     return updated

@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AutoGrader</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-mode="grading">
+    <aside class="progress-rail" aria-label="Workflow progress">
+      <div class="rail-heading">Progress</div>
+
+      <ol class="rail-steps rail-grading">
+        <li class="rail-step is-active" data-rail="grading-upload">
+          <span>Upload Files</span>
+          <small>In progress</small>
+        </li>
+        <li class="rail-step is-waiting" data-rail="grading-rubric">
+          <span>Rubric</span>
+          <small>Waiting</small>
+        </li>
+        <li class="rail-step is-waiting" data-rail="grading-answer">
+          <span>Answer Key</span>
+          <small>Waiting</small>
+        </li>
+        <li class="rail-step is-waiting" data-rail="grading-grade">
+          <span>Grade</span>
+          <small>Waiting</small>
+        </li>
+        <li class="rail-step is-waiting" data-rail="grading-results">
+          <span>Results</span>
+          <small>Waiting</small>
+        </li>
+      </ol>
+
+      <ol class="rail-steps rail-viva" hidden>
+        <li class="rail-step is-active" data-rail="viva-upload">
+          <span>Project File</span>
+          <small>In progress</small>
+        </li>
+        <li class="rail-step is-waiting" data-rail="viva-settings">
+          <span>Settings</span>
+          <small>Waiting</small>
+        </li>
+        <li class="rail-step is-waiting" data-rail="viva-results">
+          <span>Questions</span>
+          <small>Waiting</small>
+        </li>
+      </ol>
+
+      <div class="rail-footer">
+        <span>Built by</span>
+        <strong>Muhammad Umar Farooq</strong>
+      </div>
+    </aside>
+
+    <main class="shell">
+      <header class="topbar">
+        <h1>AutoGrader</h1>
+        <div class="accent-line"></div>
+        <p>AI-powered Assignment Grading - upload, review, grade, download.</p>
+      </header>
+
+      <div class="notice">
+        <strong>Archive support is enabled.</strong>
+        Upload the LMS submissions ZIP; nested ZIP, RAR, and 7z student submissions are handled when a local extractor is available.
+      </div>
+
+      <nav class="tabs" aria-label="Workflows">
+        <button class="tab active" data-tab="grading">Grade assignments</button>
+        <button class="tab" data-tab="viva">Viva questions</button>
+      </nav>
+
+      <section id="grading" class="panel active-panel">
+        <form id="gradingForm" class="workflow-form">
+          <section class="step-section is-active" data-step-section="grading-upload">
+            <div class="step-watermark">1</div>
+            <div class="step-content">
+              <h2>Upload Files</h2>
+              <p class="step-desc">Upload your submissions ZIP and assignment brief.</p>
+              <div class="form-grid two">
+                <label class="file-field">
+                  <span>Submissions ZIP</span>
+                  <input type="file" name="submissions_zip" accept=".zip" required />
+                  <small>ZIP file from LMS. Nested RAR/7z submissions are supported.</small>
+                </label>
+
+                <label class="file-field">
+                  <span>Assignment Brief</span>
+                  <input type="file" name="assignment_brief" accept=".pdf,.docx,.md,.txt,.py,.cpp,.ipynb" required />
+                  <small>PDF, DOCX, Markdown, text, code, or notebook.</small>
+                </label>
+              </div>
+            </div>
+          </section>
+
+          <hr class="step-divider" />
+
+          <section class="step-section" data-step-section="grading-rubric">
+            <div class="step-watermark">2</div>
+            <div class="step-content">
+              <h2>Grading Rubric</h2>
+              <p class="step-desc">Generate a rubric from the assignment brief, then approve or edit it before grading.</p>
+              <label>
+                <span>Editable rubric</span>
+                <textarea id="manualRubric" name="manual_rubric" rows="8" required placeholder="Generate a rubric from the brief, or paste your own approved rubric JSON/table here. You can edit this before starting grading."></textarea>
+              </label>
+              <div class="action-row compact-actions">
+                <button class="primary" id="generateRubricButton" type="button">Generate Rubric</button>
+                <button class="secondary inline-secondary" id="validateRubricButton" type="button">Validate & Preview</button>
+                <span class="toggle-note">Review or edit the rubric before starting grading.</span>
+              </div>
+              <div class="status-msg status-info" id="rubricStatus">Upload both required files in Step 1 to unlock rubric generation during grading.</div>
+              <section class="rubric-preview" id="rubricPreview" hidden>
+                <div class="rubric-preview-header">
+                  <h3>Rubric Preview</h3>
+                  <span id="rubricSummary">0 criteria</span>
+                </div>
+                <div class="rubric-criteria" id="rubricCriteria"></div>
+              </section>
+            </div>
+          </section>
+
+          <hr class="step-divider" />
+
+          <section class="step-section" data-step-section="grading-answer">
+            <div class="step-watermark">3</div>
+            <div class="step-content">
+              <h2>Answer Key</h2>
+              <p class="step-desc">Provide an answer key to improve grading accuracy.</p>
+              <div class="form-grid two">
+                <label class="file-field">
+                  <span>Answer key file optional</span>
+                  <input type="file" name="answer_key_file" accept=".pdf,.docx,.md,.txt,.py,.cpp,.ipynb" />
+                  <small>Upload a solution file if you have one.</small>
+                </label>
+
+                <label class="file-field">
+                  <span>Student roster optional</span>
+                  <input type="file" name="student_roster" accept=".xlsx,.xls" />
+                  <small>Excel roster for matching names and IDs.</small>
+                </label>
+              </div>
+              <label>
+                <span>Answer key text optional</span>
+                <textarea name="answer_key_text" rows="4" placeholder="Paste model solution notes here if you do not have a file."></textarea>
+              </label>
+            </div>
+          </section>
+
+          <hr class="step-divider" />
+
+          <section class="step-section" data-step-section="grading-grade">
+            <div class="step-watermark">4</div>
+            <div class="step-content">
+              <h2>Grade Submissions</h2>
+              <p class="step-desc">Each submission is graded against the rubric and answer key, then checked for similarity.</p>
+              <div class="form-grid two compact">
+                <label>
+                  <span>Assignment name optional</span>
+                  <input type="text" name="assignment_name" placeholder="e.g. Final Project Evaluation" />
+                </label>
+
+                <label>
+                  <span>Course / semester optional</span>
+                  <input type="text" name="course_code" placeholder="e.g. CS401" />
+                </label>
+              </div>
+              <div class="policy-card">
+                <div>
+                  <h3>Similarity policy</h3>
+                  <p>
+                    The threshold is the minimum similarity score needed before a pair is flagged.
+                    Higher values are stricter and create fewer flags; lower values catch more possible copying but may need more review.
+                  </p>
+                </div>
+                <div class="form-grid two compact">
+                  <label>
+                    <span>Flag threshold (%)</span>
+                    <input type="number" name="plagiarism_threshold" min="0" max="100" step="1" value="65" />
+                    <small>Default 65%. A pair scoring 65% or higher is flagged.</small>
+                  </label>
+
+                  <label>
+                    <span>Marks to deduct if flagged</span>
+                    <input type="number" name="plagiarism_penalty" min="0" step="0.5" value="0" />
+                    <small>Applied once per flagged student. Use 0 to only report flags.</small>
+                  </label>
+                </div>
+              </div>
+              <div class="action-row">
+                <button class="primary green" type="submit">Start Grading</button>
+                <span class="toggle-note"><span class="toggle-dot"></span> Similarity detection enabled</span>
+              </div>
+            </div>
+          </section>
+        </form>
+
+        <hr class="step-divider" />
+
+        <section class="step-section result-step" data-step-section="grading-results">
+          <div class="step-watermark">5</div>
+          <div class="step-content">
+            <h2>Results</h2>
+            <p class="step-desc">Download the teacher-friendly Excel report when grading is complete.</p>
+            <section class="result-card" id="gradingResult" hidden>
+              <div class="progress-header">
+                <strong id="gradingMessage">Queued</strong>
+                <span id="gradingPercent">0%</span>
+              </div>
+              <div class="progress-track"><div id="gradingBar" class="progress-bar"></div></div>
+              <div id="gradingOutput" class="output"></div>
+            </section>
+            <div class="status-msg status-info idle-result">Results will appear here after grading starts.</div>
+            <button class="secondary" type="button" data-reset="grading">Start Over</button>
+          </div>
+        </section>
+      </section>
+
+      <section id="viva" class="panel">
+        <form id="vivaForm" class="workflow-form">
+          <section class="step-section is-active" data-step-section="viva-upload">
+            <div class="step-watermark">1</div>
+            <div class="step-content">
+              <h2>Upload Project Document</h2>
+              <p class="step-desc">Upload a project proposal or report so AutoGrader can prepare focused viva questions.</p>
+              <label class="file-field">
+                <span>Project document</span>
+                <input type="file" name="project_document" accept=".pdf,.docx,.md,.txt,.py,.cpp,.ipynb" required />
+                <small>PDF, DOCX, Markdown, text, code, or notebook.</small>
+              </label>
+            </div>
+          </section>
+
+          <hr class="step-divider" />
+
+          <section class="step-section" data-step-section="viva-settings">
+            <div class="step-watermark">2</div>
+            <div class="step-content">
+              <h2>Question Settings</h2>
+              <p class="step-desc">Choose the level and question count for the viva.</p>
+              <div class="form-grid three">
+                <label>
+                  <span>Project name optional</span>
+                  <input type="text" name="project_name" placeholder="e.g. Smart Attendance System" />
+                </label>
+
+                <label>
+                  <span>Difficulty</span>
+                  <select name="difficulty">
+                    <option value="mixed">Mixed</option>
+                    <option value="basic">Basic</option>
+                    <option value="intermediate">Intermediate</option>
+                    <option value="advanced">Advanced</option>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Number of questions</span>
+                  <input type="number" name="question_count" min="5" max="30" value="12" />
+                </label>
+              </div>
+              <button class="primary" type="submit">Generate Viva Questions</button>
+            </div>
+          </section>
+        </form>
+
+        <hr class="step-divider" />
+
+        <section class="step-section result-step" data-step-section="viva-results">
+          <div class="step-watermark">3</div>
+          <div class="step-content">
+            <h2>Questions</h2>
+            <p class="step-desc">Use the generated questions and teacher hints during viva.</p>
+            <section class="result-card" id="vivaResult" hidden>
+              <div class="progress-header">
+                <strong id="vivaMessage">Queued</strong>
+                <span id="vivaPercent">0%</span>
+              </div>
+              <div class="progress-track"><div id="vivaBar" class="progress-bar"></div></div>
+              <div id="vivaOutput" class="output questions"></div>
+            </section>
+            <div class="status-msg status-info idle-result">Questions will appear here after generation starts.</div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

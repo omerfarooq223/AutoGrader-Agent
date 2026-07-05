@@ -6,6 +6,8 @@ Supports: PDF, DOCX, .py, .cpp, .ipynb
 import json
 import logging
 import re
+import shutil
+import subprocess
 import zipfile
 import os
 import tempfile
@@ -20,7 +22,8 @@ import config
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".py", ".cpp", ".ipynb", ".md"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".py", ".cpp", ".ipynb", ".md", ".txt"}
+NESTED_ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 MAX_FILE_SIZE_MB = 20  # Files larger than this are skipped to avoid huge prompt payloads
 
 _VISION_PROMPT = (
@@ -72,13 +75,112 @@ def extract_zip(zip_path: str, extract_to: str | None = None) -> str:
         extract_to = tempfile.mkdtemp(prefix="submissions_")
 
     with zipfile.ZipFile(zip_path, "r") as zf:
-        for member in zf.namelist():
-            member_path = os.path.normpath(member)
-            if member_path.startswith("..") or os.path.isabs(member_path):
-                raise ValueError(f"Unsafe path in ZIP archive: {member}")
+        _validate_archive_members(zf.namelist(), zip_path)
         zf.extractall(extract_to)
 
     return extract_to
+
+
+def _validate_archive_members(members: list[str], archive_path: str) -> None:
+    """Reject archive members that could escape the target extraction directory."""
+    for member in members:
+        if not member:
+            continue
+        member_path = os.path.normpath(member)
+        if (
+            member_path.startswith("..")
+            or os.path.isabs(member_path)
+            or member_path == ".."
+        ):
+            raise ValueError(f"Unsafe path in archive {archive_path}: {member}")
+
+
+def _extract_with_bsdtar(archive_path: str, extract_to: str) -> bool:
+    """Extract RAR/7z using bsdtar/libarchive when available."""
+    tool = shutil.which("bsdtar")
+    if not tool:
+        return False
+
+    listed = subprocess.run(
+        [tool, "-tf", archive_path],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    members = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    _validate_archive_members(members, archive_path)
+
+    os.makedirs(extract_to, exist_ok=True)
+    subprocess.run(
+        [tool, "-xf", archive_path, "-C", extract_to],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    return True
+
+
+def _extract_with_7z(archive_path: str, extract_to: str) -> bool:
+    """Extract RAR/7z using 7z when available."""
+    tool = shutil.which("7z")
+    if not tool:
+        return False
+
+    listed = subprocess.run(
+        [tool, "l", "-slt", archive_path],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    members = [
+        line.split("=", 1)[1].strip()
+        for line in listed.stdout.splitlines()
+        if line.startswith("Path = ") and line.split("=", 1)[1].strip() != archive_path
+    ]
+    _validate_archive_members(members, archive_path)
+
+    os.makedirs(extract_to, exist_ok=True)
+    subprocess.run(
+        [tool, "x", "-y", f"-o{extract_to}", archive_path],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    return True
+
+
+def extract_archive(archive_path: str, extract_to: str | None = None) -> str:
+    """
+    Extract a supported archive and return the extraction directory.
+    ZIP uses Python's stdlib. RAR/7z require a local tool such as bsdtar or 7z.
+    """
+    if extract_to is None:
+        extract_to = tempfile.mkdtemp(prefix="submissions_")
+
+    ext = Path(archive_path).suffix.lower()
+    if ext == ".zip":
+        return extract_zip(archive_path, extract_to)
+
+    if ext in {".rar", ".7z"}:
+        errors: list[str] = []
+        for extractor in (_extract_with_bsdtar, _extract_with_7z):
+            try:
+                if extractor(archive_path, extract_to):
+                    return extract_to
+            except Exception as exc:
+                errors.append(str(exc))
+                logger.debug("Archive extractor failed for %s: %s", archive_path, exc, exc_info=True)
+        detail = f" Last error: {errors[-1]}" if errors else ""
+        raise RuntimeError(
+            "RAR/7z extraction requires a local archive tool such as bsdtar/libarchive or 7z."
+            + detail
+        )
+
+    raise ValueError(f"Unsupported archive format: {ext}")
 
 
 def read_pdf(file_path: str) -> str:
@@ -195,6 +297,7 @@ _READERS = {
     ".cpp":   read_text_file,
     ".ipynb": read_notebook,
     ".md":    read_text_file,
+    ".txt":   read_text_file,
 }
 
 
@@ -596,8 +699,8 @@ def _parse_lms_path(file_path: str, base_dir: str) -> dict:
 
 def _extract_nested_archives(directory: str, max_passes: int = 3) -> None:
     """
-    Extract .zip files found inside the extracted LMS bundle.
-    Handles "ZIP within ZIP" submissions by recursively unpacking a few levels.
+    Extract nested archive files found inside the extracted LMS bundle.
+    Handles "ZIP/RAR/7z within ZIP" submissions by recursively unpacking a few levels.
     """
     for _ in range(max_passes):
         extracted_any = False
@@ -608,26 +711,20 @@ def _extract_nested_archives(directory: str, max_passes: int = 3) -> None:
 
             for filename in files:
                 ext = Path(filename).suffix.lower()
-                if ext in {".rar", ".7z"}:
-                    logger.warning(
-                        "Skipping unsupported nested archive %s — convert to ZIP.",
-                        os.path.join(root, filename),
-                    )
-                    continue
-                if ext != ".zip":
+                if ext not in NESTED_ARCHIVE_EXTENSIONS:
                     continue
 
-                zip_path = os.path.join(root, filename)
-                target_dir = os.path.join(root, f"{Path(filename).stem}_nested_zip")
+                archive_path = os.path.join(root, filename)
+                target_dir = os.path.join(root, f"{Path(filename).stem}_nested_{ext.lstrip('.')}")
                 if os.path.exists(target_dir):
                     continue
 
                 try:
-                    extract_zip(zip_path, target_dir)
+                    extract_archive(archive_path, target_dir)
                     extracted_any = True
-                    logger.info("Extracted nested ZIP: %s", zip_path)
+                    logger.info("Extracted nested archive: %s", archive_path)
                 except Exception as e:
-                    logger.warning("Skipping invalid nested ZIP %s: %s", zip_path, e)
+                    logger.warning("Skipping nested archive %s: %s", archive_path, e)
 
         if not extracted_any:
             break
@@ -689,10 +786,29 @@ def collect_submissions(
 
         for filename in sorted(files):
             ext = Path(filename).suffix.lower()
-            if ext in {".rar", ".7z"}:
-                logger.warning(
-                    "Skipping unsupported archive %s — convert it to ZIP.",
-                    os.path.join(root, filename),
+            if ext in NESTED_ARCHIVE_EXTENSIONS:
+                extracted_dir = os.path.join(root, f"{Path(filename).stem}_nested_{ext.lstrip('.')}")
+                if os.path.isdir(extracted_dir):
+                    continue
+                # If an archive reaches this pass, nested extraction failed or no
+                # local extractor is available. Keep a readable error in the report.
+                full_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(full_path, directory)
+                lms_meta = _parse_lms_path(full_path, directory)
+                group_key = _student_group_key(full_path, directory, lms_meta)
+                group = grouped.setdefault(group_key, {"files": [], "lms_meta": lms_meta})
+                group["files"].append(
+                    {
+                        "filename": filename,
+                        "path": full_path,
+                        "rel_path": rel_path,
+                        "content": (
+                            f"[ERROR: Could not extract archive '{filename}'. "
+                            "RAR/7z submissions require a local archive tool such as bsdtar/libarchive or 7z. "
+                            "Student may need to resubmit as ZIP.]"
+                        ),
+                        "error": "archive_extract_failed",
+                    }
                 )
                 continue
             if ext not in SUPPORTED_EXTENSIONS:
