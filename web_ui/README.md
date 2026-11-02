@@ -10,17 +10,15 @@ From the project root:
 python web_ui/server.py
 ```
 
-If your default `python` does not have the project dependencies installed, run it with the same interpreter or virtual environment you use for tests, for example:
+Activate the project's virtual environment first, or use its interpreter directly:
 
 ```bash
-/usr/local/bin/python3 web_ui/server.py
+.venv/bin/python web_ui/server.py
 ```
 
-Open:
+This command starts both the frontend and the local backend. No separate frontend server is needed. Keep it running while you use the app.
 
-```text
-http://127.0.0.1:8765
-```
+Open **[AutoGrader](http://127.0.0.1:8765/)**. For first-time dependency installation and API-key setup, see the [main README](../README.md#quick-start).
 
 ## Workflows
 
@@ -29,7 +27,7 @@ http://127.0.0.1:8765
 1. Upload the submissions ZIP.
 2. Upload the assignment brief.
 3. Optionally upload a roster and answer key.
-4. Optionally paste a manual rubric.
+4. Paste your own JSON, table, or plain-text rubric and select **Validate & Preview**, or select **Generate Rubric** to create one from the brief. Review criteria and total marks; edit and validate again as needed. A rubric is required before grading starts.
 5. Set the similarity policy:
    - `Flag threshold (%)` controls how similar two submissions must be before they are flagged.
    - `Marks to deduct if flagged` applies once per flagged student. Use `0` for report-only flags.

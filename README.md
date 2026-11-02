@@ -1,6 +1,48 @@
 # AutoGrader
 
-AI-powered grading agent that automates assignment evaluation using LLMs. Available as a **CLI tool** and a clean **JavaScript web UI** backed by the existing Python grading engine.
+**Assignment grading, with the teacher in control.**
+
+Turn student submissions and an assignment brief into a structured Excel report. Paste your own rubric or generate one, review it before grading, and inspect scores, feedback, and similarity flags in one place.
+
+[Quick Start](#quick-start) · [Web UI](#web-ui) · [Rubric Example](#rubric-example) · [Configuration](#configuration) · [Project Structure](#project-structure)
+
+---
+
+## Quick Start
+
+Run these commands from the project root. Python and access to a configured LLM provider are required for AI-powered tasks.
+
+### 1. Install Dependencies
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+On Windows, activate the environment with `.venv\Scripts\activate` instead.
+
+### 2. Configure API Keys
+
+If you do not already have a `.env` file, copy the template:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and add your `GROQ_API_KEY` and `GEMINI_API_KEY`. Groq is the primary provider; Gemini provides fallback and optional image descriptions. The CLI requires a Groq key. Keep `.env` private and never commit credentials.
+
+### 3. Start AutoGrader
+
+```bash
+python web_ui/server.py
+```
+
+Open **[AutoGrader in your browser](http://127.0.0.1:8765/)**.
+
+> **One command starts both parts.** The Python server serves the frontend and handles backend requests. No separate frontend server or JavaScript build is needed. Keep the terminal running while using the app.
+
+See the [Web UI guide](web_ui/README.md) for browser-specific instructions.
 
 ## What It Does
 
@@ -38,10 +80,14 @@ flowchart LR
 
 ## Demo
 
-Below is an older demo of the original Streamlit UI:
+<details>
+<summary>View the legacy Streamlit interface demo</summary>
 
-![Demo of AutoGrader UI](demo.gif)
+This recording shows the original Streamlit interface, not the current JavaScript frontend.
 
+![AutoGrader legacy Streamlit interface demo](demo.gif)
+
+</details>
 
 ## Project Structure
 
@@ -126,23 +172,15 @@ When evaluating very large assignments or bulk processing dozens of submissions 
 
 > **Agentic IDE Workaround**: If you run into these API limitations, you can use any advanced AI IDE (Cursor, GitHub Copilot, Antigravity, etc.) to evaluate the assignments autonomously. Just point the IDE's agent to `docs/workflow.md` and provide it the file paths of your submissions, assignment brief, rubric, and answer key. The agent can then use the workflow rules to grade the files locally and generate the finalized Excel report for you manually.
 
-## Quick Start
+## Command Line
+
+With the virtual environment active and API keys configured, run:
 
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Set up your API keys
-cp .env.example .env
-# Edit .env and add your GROQ_API_KEY and GEMINI_API_KEY
-
-# 3a. Run via CLI
 python main.py submissions.zip assignment_brief.pdf
+
 # Optional: pass a roster Excel with Name/ID columns
 python main.py submissions.zip assignment_brief.pdf student_roster.xlsx
-
-# 3b. Run via JavaScript Web UI
-python web_ui/server.py
 ```
 
 ## Web UI
@@ -162,11 +200,41 @@ flowchart TD
 
 1. Upload a submissions ZIP and assignment brief.
 2. Optionally upload a student roster and answer key.
-3. Paste a manual rubric, or leave it blank for automatic rubric generation.
+3. Paste your own rubric and select **Validate & Preview**, or select **Generate Rubric** to create one from the brief. Review the criterion names, descriptions, individual marks, and total. Edit as needed, then validate again to refresh the preview.
 4. Set the similarity policy:
    - **Flag threshold (%)** is the minimum combined similarity score needed before two submissions are flagged. Higher values create fewer, stricter flags; lower values catch more possible copying but may need more review.
    - **Marks to deduct if flagged** is applied once per flagged student. Keep it at `0` to report similarity without changing marks.
 5. Start grading, watch progress, then download the styled Excel report.
+
+> A rubric must be present before browser grading starts. Leaving the rubric field blank does not trigger automatic generation during grading.
+
+### Rubric Example
+
+Paste JSON with a top-level `criteria` array. Each criterion contains a `name`, numeric `max_score`, and `description`:
+
+```json
+{
+  "criteria": [
+    {
+      "name": "Correctness",
+      "max_score": 60,
+      "description": "Meets the requirements and handles edge cases."
+    },
+    {
+      "name": "Code Quality",
+      "max_score": 25,
+      "description": "Uses clear structure and maintainable logic."
+    },
+    {
+      "name": "Testing",
+      "max_score": 15,
+      "description": "Covers normal, boundary, and invalid-input cases."
+    }
+  ]
+}
+```
+
+This example totals **100 marks**. Tables and plain-text rubrics are also accepted. Parsing uses LLM fallback when deterministic parsing cannot resolve the input; always review the resulting preview.
 
 ### Viva Questions
 
@@ -181,24 +249,19 @@ flowchart TD
 2. Choose difficulty and question count.
 3. Generate project-specific viva questions with concise teacher hints.
 
+### Legacy Streamlit UI
+
+The original interface remains available:
+
 ```bash
-# Start the JavaScript web UI
-python web_ui/server.py
-
-# Open in your browser
-http://127.0.0.1:8765
-```
-
-The Streamlit interface (`app.py`) is still available as a legacy UI:
-
-.venv/bin/streamlit run app.py
+python -m streamlit run app.py
 ```
 
 ## Configuration
 
-All settings are in `.env` (see `.env.example`):
+Settings load from `.env`. See [`.env.example`](.env.example) for a starting template and [`config.py`](config.py) for code defaults. Template values can differ from code defaults.
 
-| Variable | Default | Description |
+| Variable | Code Default | Description |
 |----------|---------|-------------|
 | `GROQ_API_KEY` | — | Your Groq API key (**Primary — recommended**) |
 | `GEMINI_API_KEY` | — | Your Gemini API key (Secondary fallback) |
@@ -207,8 +270,18 @@ All settings are in `.env` (see `.env.example`):
 | `EXTRACT_IMAGES` | `False` | Turn on to extract and describe images |
 | `MAX_CONCURRENT_GRADES` | `1` | Parallel grading workers |
 | `CHUNKED_GRADING_CHAR_LIMIT` | `45000` | Prompt size where chunked grading begins |
+| `CHUNKED_GRADING_CHUNK_CHARS` | `22000` | Submission chunk size |
+| `CHUNKED_GRADING_OVERLAP_CHARS` | `1200` | Overlap between chunks |
 | `CHUNKED_EVIDENCE_AGGREGATION_CHAR_LIMIT` | `36000` | Evidence size where hierarchical aggregation begins |
 | `CHUNKED_EVIDENCE_GROUP_SIZE` | `8` | Max evidence blocks per intermediate aggregation batch |
+
+The server also accepts `AUTOGRADER_WEB_HOST` (default `127.0.0.1`) and `AUTOGRADER_WEB_PORT` (default `8765`). It is intended for local use; do not expose it publicly without appropriate access controls. Provider model availability depends on your account and region.
+
+## Responsible Use
+
+- **Review AI results.** Scores, feedback, and image descriptions can be wrong. The teacher's review remains the final check.
+- **Similarity is a signal, not proof.** Shared templates and legitimate overlap can trigger flags. Inspect matches before applying penalties.
+- **Consider student privacy.** AI features send submission content to configured external providers. Follow your institution's data-handling policy.
 
 ## Tech Stack
 
@@ -223,3 +296,5 @@ All settings are in `.env` (see `.env.example`):
 ## Author
 
 Muhammad Umar Farooq — [GitHub](https://github.com/omerfarooq223)
+
+Released under the [MIT License](LICENSE).
